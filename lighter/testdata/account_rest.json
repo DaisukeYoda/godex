@@ -1,0 +1,25 @@
+{
+  "code": 200,
+  "accounts": [
+    {
+      "account_index": 48,
+      "collateral": "100.000000",
+      "available_balance": "85.000000",
+      "total_asset_value": "99.985000",
+      "positions": [
+        {
+          "market_id": 2,
+          "symbol": "SOL",
+          "open_order_count": 1,
+          "sign": -1,
+          "position": "0.050",
+          "avg_entry_price": "150.300",
+          "position_value": "7.515",
+          "unrealized_pnl": "-0.015",
+          "realized_pnl": "0",
+          "margin_mode": 0
+        }
+      ]
+    }
+  ]
+}

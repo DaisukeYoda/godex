@@ -1,0 +1,13 @@
+{
+  "type": "update/account_all",
+  "channel": "account_all:48",
+  "positions": {
+    "2": {
+      "market_id": 2,
+      "sign": 1,
+      "position": "0.050",
+      "avg_entry_price": "150.120",
+      "margin_mode": 0
+    }
+  }
+}

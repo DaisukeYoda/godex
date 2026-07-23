@@ -1,0 +1,6 @@
+# Credentials must never be committed.
+.env
+.env.*
+
+# Smoke-test recordings may contain account data.
+*.jsonl

@@ -1,0 +1,31 @@
+{
+  "channel": "account_all_orders:48",
+  "orders": {
+    "2": [
+      {
+        "order_index": 1125899906551881,
+        "client_order_index": 1783182277198,
+        "order_id": "1125899906551881",
+        "client_order_id": "1783182277198",
+        "market_index": 2,
+        "owner_account_index": 48,
+        "initial_base_amount": "0.200",
+        "price": "82.930",
+        "nonce": 281474976419913,
+        "remaining_base_amount": "0.000",
+        "is_ask": false,
+        "filled_base_amount": "0.000",
+        "filled_quote_amount": "0.000000",
+        "type": "limit",
+        "time_in_force": "post-only",
+        "reduce_only": false,
+        "trigger_price": "0.000",
+        "order_expiry": 1785601477198,
+        "status": "canceled-post-only",
+        "block_height": 10630,
+        "timestamp": 1783182277
+      }
+    ]
+  },
+  "type": "update/account_all_orders"
+}

@@ -1,0 +1,36 @@
+{
+  "account": 48,
+  "assets": null,
+  "channel": "account_all:48",
+  "funding_histories": {},
+  "positions": {},
+  "shares": [],
+  "trades": {
+    "2": [
+      {
+        "trade_id": 104838,
+        "trade_id_str": "104838",
+        "tx_hash": "43ffcac45a3d0c20e6bcce2a0d24e12295451cba22db4011cb98776165f7dc9e3e3cdab48bf0fd38",
+        "type": "trade",
+        "market_id": 2,
+        "size": "0.200",
+        "price": "82.236",
+        "usd_amount": "16.447200",
+        "ask_id": 844424930414531,
+        "ask_id_str": "844424930414531",
+        "bid_id": 1125899906550902,
+        "bid_id_str": "1125899906550902",
+        "ask_client_id": 178318057992411,
+        "ask_client_id_str": "178318057992411",
+        "bid_client_id": 1783182472088,
+        "bid_client_id_str": "1783182472088",
+        "ask_account_id": 7,
+        "bid_account_id": 48,
+        "is_maker_ask": true,
+        "block_height": 10667,
+        "timestamp": 1783182477422
+      }
+    ]
+  },
+  "type": "update/account_all"
+}

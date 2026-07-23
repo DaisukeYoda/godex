@@ -1,0 +1,20 @@
+{
+  "code": 200,
+  "order_book_details": [
+    {
+      "market_id": 2,
+      "symbol": "SOL",
+      "status": "active",
+      "taker_fee": "0.0000",
+      "maker_fee": "0.0000",
+      "min_base_amount": "0.050",
+      "min_quote_amount": "10",
+      "maintenance_margin_fraction": 240,
+      "supported_price_decimals": 3,
+      "supported_size_decimals": 3,
+      "last_trade_price": 150.123,
+      "daily_quote_token_volume": 1234567.8,
+      "open_interest": 10432.11
+    }
+  ]
+}

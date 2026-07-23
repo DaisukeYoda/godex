@@ -1,0 +1,28 @@
+{
+  "account": 48,
+  "assets": null,
+  "channel": "account_all:48",
+  "funding_histories": {},
+  "positions": {
+    "2": {
+      "market_id": 2,
+      "symbol": "SOL",
+      "initial_margin_fraction": "6.66",
+      "open_order_count": 1,
+      "pending_order_count": 0,
+      "position_tied_order_count": 0,
+      "sign": 1,
+      "position": "0.000",
+      "avg_entry_price": "0.000",
+      "position_value": "-0.000000",
+      "unrealized_pnl": "0.000000",
+      "realized_pnl": "0.000000",
+      "liquidation_price": "0",
+      "margin_mode": 0,
+      "allocated_margin": "0.000000"
+    }
+  },
+  "shares": [],
+  "trades": {},
+  "type": "update/account_all"
+}
