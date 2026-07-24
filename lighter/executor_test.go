@@ -62,7 +62,7 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		venue.nonceFetches++
 		nonce := venue.nonce
 		venue.mu.Unlock()
-		fmt.Fprintf(w, `{"code":200,"nonce":%d}`, nonce)
+		_, _ = fmt.Fprintf(w, `{"code":200,"nonce":%d}`, nonce)
 	})
 	mux.HandleFunc("/api/v1/account", func(w http.ResponseWriter, _ *http.Request) {
 		venue.mu.Lock()
