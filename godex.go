@@ -66,6 +66,11 @@ var (
 //     executions. Adapters never infer fills or positions from book state.
 //   - Price tick and size step rounding are the adapter's responsibility.
 //
+// Concurrency: Connect must return before any other method is called — it
+// resolves the market metadata and signer the other methods read, and nothing
+// else establishes that ordering. Afterwards PlaceOrder, CancelOrder, and
+// AccountEvents are safe to use concurrently, and Close is terminal.
+//
 // Event ordering contract (AccountEvents):
 //   - ConnectedEvent and DisconnectedEvent alternate, including across
 //     internal reconnects.

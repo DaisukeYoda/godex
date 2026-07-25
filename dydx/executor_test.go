@@ -1014,23 +1014,34 @@ func TestOrderExpirySurfacesAsRejection(t *testing.T) {
 
 func orderRemovalFrame(t *testing.T, clientID, goodTilBlock uint32, reason string) []byte {
 	t.Helper()
+	return orderFrame(t, clientID, "venue-order-"+strconv.FormatUint(uint64(clientID), 10),
+		orderStatusCanceled, map[string]any{
+			"goodTilBlock":  strconv.FormatUint(uint64(goodTilBlock), 10),
+			"removalReason": reason,
+		})
+}
+
+// orderFrame builds one channel_data order update, with any extra fields the
+// case needs merged in.
+func orderFrame(t *testing.T, clientID uint32, venueOrderID, status string, extra map[string]any) []byte {
+	t.Helper()
+	order := map[string]any{
+		"id":         venueOrderID,
+		"clientId":   strconv.FormatUint(uint64(clientID), 10),
+		"clobPairId": "1",
+		"side":       "BUY",
+		"status":     status,
+	}
+	for key, value := range extra {
+		order[key] = value
+	}
 	frame, err := json.Marshal(map[string]any{
-		"type":    wsTypeChannelData,
-		"channel": subaccountsChannel,
-		"contents": map[string]any{
-			"orders": []any{map[string]any{
-				"id":            "venue-order-" + strconv.FormatUint(uint64(clientID), 10),
-				"clientId":      strconv.FormatUint(uint64(clientID), 10),
-				"clobPairId":    "1",
-				"side":          "BUY",
-				"status":        orderStatusCanceled,
-				"goodTilBlock":  strconv.FormatUint(uint64(goodTilBlock), 10),
-				"removalReason": reason,
-			}},
-		},
+		"type":     wsTypeChannelData,
+		"channel":  subaccountsChannel,
+		"contents": map[string]any{"orders": []any{order}},
 	})
 	if err != nil {
-		t.Fatalf("encode order removal frame: %v", err)
+		t.Fatalf("encode order frame: %v", err)
 	}
 	return frame
 }
@@ -1070,23 +1081,7 @@ func TestFillFromStreamIsAttributedToItsOrder(t *testing.T) {
 
 func orderOpenFrame(t *testing.T, clientID uint32, venueOrderID string) []byte {
 	t.Helper()
-	frame, err := json.Marshal(map[string]any{
-		"type":    wsTypeChannelData,
-		"channel": subaccountsChannel,
-		"contents": map[string]any{
-			"orders": []any{map[string]any{
-				"id":         venueOrderID,
-				"clientId":   strconv.FormatUint(uint64(clientID), 10),
-				"clobPairId": "1",
-				"side":       "BUY",
-				"status":     orderStatusOpen,
-			}},
-		},
-	})
-	if err != nil {
-		t.Fatalf("encode order frame: %v", err)
-	}
-	return frame
+	return orderFrame(t, clientID, venueOrderID, orderStatusOpen, nil)
 }
 
 func fillFrame(t *testing.T, fillID, venueOrderID, price, size string) []byte {
@@ -1312,6 +1307,92 @@ func TestUnknownStreamMessageAbortsIntoReconnect(t *testing.T) {
 	if _, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
 		"snapshot after reconnect", isPositionEvent); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestFilledOrdersAreRetiredWithoutARejection: a fully filled order is terminal
+// too. It must stop being tracked — otherwise every IOC leaks an entry for the
+// life of the process — but reporting it as rejected would contradict the fills
+// already delivered.
+func TestFilledOrdersAreRetiredWithoutARejection(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, fake, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	const orders = 5
+	mark := collector.Mark()
+	var lastID godex.OrderID
+	for range orders {
+		ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentIOC))
+		if err != nil {
+			t.Fatalf("PlaceOrder: %v", err)
+		}
+		lastID = ack.OrderID
+		params := fake.lastPlace(t)
+		venueOrderID := "venue-order-" + strconv.FormatUint(uint64(params.clientID), 10)
+		venue.push(orderFrame(t, params.clientID, venueOrderID, orderStatusOpen, nil))
+		venue.push(orderFrame(t, params.clientID, venueOrderID, orderStatusFilled, nil))
+	}
+
+	// Cancelling the last one proves the stream has been drained: it only
+	// reports unknown once the FILLED update has retired it.
+	deadline := time.Now().Add(testEventTimeout)
+	for !errors.Is(executor.CancelOrder(context.Background(), lastID), godex.ErrUnknownOrder) {
+		if time.Now().After(deadline) {
+			t.Fatal("a filled order was never retired")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	executor.stateMu.Lock()
+	tracked, byClient := len(executor.orders), len(executor.orderIDsByClientID)
+	byVenue := len(executor.orderIDsByVenueID)
+	executor.stateMu.Unlock()
+	if tracked != 0 || byClient != 0 {
+		t.Fatalf("after %d filled orders: %d tracked, %d client-id entries; want none",
+			orders, tracked, byClient)
+	}
+	// The venue-id mapping outlives the order on purpose (a late fill must stay
+	// attributable), but it is bounded by age rather than growing forever.
+	if byVenue > orders {
+		t.Fatalf("venue-id mapping holds %d entries for %d orders", byVenue, orders)
+	}
+
+	for _, event := range collector.Events()[mark:] {
+		if rejected, ok := event.(godex.OrderRejectedEvent); ok {
+			t.Fatalf("a filled order was reported as rejected: %+v", rejected)
+		}
+	}
+}
+
+// TestVenueOrderMappingIsPrunedByAge keeps the late-attribution window from
+// becoming an unbounded map in a long-running process.
+func TestVenueOrderMappingIsPrunedByAge(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+
+	executor.stateMu.Lock()
+	executor.rememberVenueOrderLocked("venue-order-stale", ack.OrderID)
+	// Age the entry past the window in which a fill could still reference it.
+	stale := executor.orderIDsByVenueID["venue-order-stale"]
+	stale.at = stale.at.Add(-2 * venueOrderMappingTTL)
+	executor.orderIDsByVenueID["venue-order-stale"] = stale
+	executor.rememberVenueOrderLocked("venue-order-fresh", ack.OrderID)
+	_, stalePresent := executor.orderIDsByVenueID["venue-order-stale"]
+	_, freshPresent := executor.orderIDsByVenueID["venue-order-fresh"]
+	executor.stateMu.Unlock()
+
+	if stalePresent {
+		t.Fatal("an expired venue-id mapping survived")
+	}
+	if !freshPresent {
+		t.Fatal("pruning dropped a live venue-id mapping")
 	}
 }
 

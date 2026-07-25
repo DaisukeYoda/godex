@@ -296,9 +296,13 @@ func rejectionReason(update *orderUpdate, ref orderRef) string {
 	}
 }
 
-// isRemoval reports whether an order update means the order is no longer live.
-// BEST_EFFORT_CANCELED is included: the order is off the book as far as this
+// isRemoval reports whether an order update means the venue took the order off
+// the book. BEST_EFFORT_CANCELED is included: the order is gone as far as this
 // node knows, and a short-term order cannot come back.
+//
+// A fully filled order is deliberately excluded — it is terminal too, but it
+// ended by executing, and reporting a rejection for it would contradict the
+// fills already delivered. isFilled covers that case instead.
 func isRemoval(update *orderUpdate) bool {
 	switch *update.Status {
 	case orderStatusCanceled, orderStatusBestEffortCanceled:
@@ -306,6 +310,12 @@ func isRemoval(update *orderUpdate) bool {
 	default:
 		return false
 	}
+}
+
+// isFilled reports that the order completed by executing in full, so no further
+// fill or removal can reference it.
+func isFilled(update *orderUpdate) bool {
+	return *update.Status == orderStatusFilled
 }
 
 // clientIDOf returns an order update's client id.

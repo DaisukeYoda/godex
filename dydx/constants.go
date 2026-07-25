@@ -101,6 +101,7 @@ const (
 // Indexer order status and removal reason values used to normalize rejections.
 const (
 	orderStatusOpen               = "OPEN"
+	orderStatusFilled             = "FILLED"
 	orderStatusCanceled           = "CANCELED"
 	orderStatusBestEffortCanceled = "BEST_EFFORT_CANCELED"
 
@@ -151,6 +152,9 @@ const (
 	// How long a fill id stays in the duplicate-suppression cache. Comfortably
 	// longer than any reconnect plus backfill window.
 	fillDedupTTL = 1 * time.Hour
+	// How long a venue order id stays resolvable after its order is gone, so a
+	// fill the Indexer reports late is still attributable to the caller's order.
+	venueOrderMappingTTL = 1 * time.Hour
 	// Page size for the reconnect fill backfill.
 	fillBackfillLimit = 100
 	// Pages the backfill will walk back before giving up. Reaching this bound

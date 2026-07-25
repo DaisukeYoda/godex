@@ -330,10 +330,27 @@ func TestRejectionReasonWithoutVenueReason(t *testing.T) {
 }
 
 func TestIsRemovalIgnoresLiveStatuses(t *testing.T) {
-	for _, status := range []string{orderStatusOpen, "FILLED", "BEST_EFFORT_OPENED"} {
+	for _, status := range []string{orderStatusOpen, "BEST_EFFORT_OPENED"} {
 		value := status
 		if isRemoval(&orderUpdate{Status: &value}) {
 			t.Fatalf("status %q must not be treated as a removal", status)
 		}
+		if isFilled(&orderUpdate{Status: &value}) {
+			t.Fatalf("status %q must not be treated as filled", status)
+		}
+	}
+}
+
+// TestFilledIsTerminalButNotARemoval draws the distinction the executor acts
+// on: a filled order is finished, so it stops being tracked, but it ended by
+// executing — reporting a rejection would contradict the fills already sent.
+func TestFilledIsTerminalButNotARemoval(t *testing.T) {
+	status := orderStatusFilled
+	update := &orderUpdate{Status: &status}
+	if isRemoval(update) {
+		t.Fatal("a filled order must not produce a rejection")
+	}
+	if !isFilled(update) {
+		t.Fatal("a filled order is terminal and must stop being tracked")
 	}
 }

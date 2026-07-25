@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"strconv"
 	"sync"
 	"time"
@@ -36,6 +37,18 @@ type orderRef struct {
 	// goodTilBlock is the block the order expires at, kept so an expiry
 	// removal can be reported with the block that caused it.
 	goodTilBlock uint32
+}
+
+// venueOrderRef maps one of the venue's order ids back to the caller's order id.
+//
+// The mapping deliberately outlives the order: a cancel and a fill can cross on
+// chain, so a fill may reference an order the executor has already dropped, and
+// losing the mapping would report that execution under a venue id the caller
+// never saw. Entries are pruned by age instead, which bounds the map without
+// giving up late attribution.
+type venueOrderRef struct {
+	orderID godex.OrderID
+	at      time.Time
 }
 
 type accountInvalidObservation struct {
@@ -89,7 +102,7 @@ type Executor struct {
 	accountInvalid       *accountInvalidObservation
 	orders               map[godex.OrderID]orderRef
 	orderIDsByClientID   map[uint32]godex.OrderID
-	orderIDsByVenueID    map[string]godex.OrderID
+	orderIDsByVenueID    map[string]venueOrderRef
 	clientIDCounter      uint32
 	seenFills            map[string]time.Time
 	// fillFloor is the instant through which the account's fills predate this
@@ -121,15 +134,15 @@ func New(cfg Config) (*Executor, error) {
 		lifecycleCancel:    lifecycleCancel,
 		orders:             make(map[godex.OrderID]orderRef),
 		orderIDsByClientID: make(map[uint32]godex.OrderID),
-		orderIDsByVenueID:  make(map[string]godex.OrderID),
+		orderIDsByVenueID:  make(map[string]venueOrderRef),
 		seenFills:          make(map[string]time.Time),
 		snapshotReady:      make(chan struct{}, 1),
-		// Seeded from the wall clock so client ids stay unique across restarts
-		// without persistence. Reuse is safe in a way it would not be on a
-		// venue with resting orders: a short-term order lives at most
-		// shortBlockWindow blocks, so any id last used more than that long ago
-		// cannot still refer to a live order.
-		clientIDCounter: uint32(resolved.now().Unix()),
+		// Randomly seeded so ids stay unique without persistence, across both
+		// restarts and any two executors that happen to start together. A
+		// wall-clock seed would collide outright for the latter. Collision is
+		// only consequential while an order is live, which for a short-term
+		// order is at most shortBlockWindow blocks.
+		clientIDCounter: rand.Uint32(),
 	}, nil
 }
 
@@ -854,13 +867,15 @@ func (e *Executor) handleSubscribed(contents *subaccountContents) error {
 // half-populated position.
 func (e *Executor) handleChannelData(contents *subaccountContents) error {
 	e.indexOrders(contents.Orders)
-	e.applyOrderRemovals(contents.Orders)
 
+	// Fills first: a frame can carry both an execution and the terminal order
+	// update it caused, and the execution is the reason for the ending.
 	for i := range contents.Fills {
 		if err := e.emitFill(&contents.Fills[i]); err != nil {
 			return err
 		}
 	}
+	e.applyOrderUpdates(contents.Orders)
 
 	entry := findPosition(contents.PerpetualPositions, e.cfg.ticker)
 	if entry == nil {
@@ -897,21 +912,27 @@ func (e *Executor) indexOrders(orders ordersResponse) {
 			continue
 		}
 		if id, ok := e.orderIDsByClientID[clientID]; ok {
-			e.orderIDsByVenueID[*update.ID] = id
+			e.rememberVenueOrderLocked(*update.ID, id)
 		}
 	}
 }
 
-// applyOrderRemovals reports tracked orders the venue has removed. A short-term
-// order reaching good_til_block lands here too: the contract has no expiry
-// event, and a rejection carries the right meaning — the order is gone and will
-// never fill.
-func (e *Executor) applyOrderRemovals(orders ordersResponse) {
+// applyOrderUpdates retires tracked orders the venue reports as finished.
+//
+// A removal is reported as a rejection — a short-term order reaching
+// good_til_block lands here too, since the contract has no expiry event and
+// "rejected" carries the right meaning: the order is gone and will never fill.
+// A fully filled order is retired silently, because its fills have already been
+// delivered and a rejection would contradict them. Either way the order stops
+// being tracked, which is what keeps the tables from growing for the life of the
+// process.
+func (e *Executor) applyOrderUpdates(orders ordersResponse) {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
 	for i := range orders {
 		update := &orders[i]
-		if !isRemoval(update) {
+		removed, filled := isRemoval(update), isFilled(update)
+		if !removed && !filled {
 			continue
 		}
 		clientID, err := clientIDOf(update)
@@ -925,7 +946,21 @@ func (e *Executor) applyOrderRemovals(orders ordersResponse) {
 		ref := e.orders[id]
 		delete(e.orders, id)
 		delete(e.orderIDsByClientID, clientID)
-		e.send(godex.OrderRejectedEvent{OrderID: id, Reason: rejectionReason(update, ref)})
+		if removed {
+			e.send(godex.OrderRejectedEvent{OrderID: id, Reason: rejectionReason(update, ref)})
+		}
+	}
+}
+
+// rememberVenueOrderLocked records a venue order id, pruning entries too old to
+// still receive a fill so the mapping stays bounded.
+func (e *Executor) rememberVenueOrderLocked(venueOrderID string, id godex.OrderID) {
+	now := e.cfg.now()
+	e.orderIDsByVenueID[venueOrderID] = venueOrderRef{orderID: id, at: now}
+	for seen, ref := range e.orderIDsByVenueID {
+		if now.Sub(ref.at) > venueOrderMappingTTL {
+			delete(e.orderIDsByVenueID, seen)
+		}
 	}
 }
 
@@ -950,8 +985,8 @@ func (e *Executor) emitFill(entry *fill) error {
 
 	orderID := godex.OrderID("")
 	if entry.OrderID != nil {
-		if id, ok := e.orderIDsByVenueID[*entry.OrderID]; ok {
-			orderID = id
+		if ref, ok := e.orderIDsByVenueID[*entry.OrderID]; ok {
+			orderID = ref.orderID
 		} else {
 			// A fill on an order this executor did not place — another client
 			// on the same subaccount. It still moves the position, so it is
@@ -1019,13 +1054,22 @@ func (e *Executor) establishFillFloor(ctx context.Context) error {
 	fills := *response.Fills
 
 	newest := time.Time{}
+	for i := range fills {
+		// The floor is only as trustworthy as the timestamps it is built from,
+		// so an unparseable one fails here exactly as it would during a
+		// backfill rather than silently lowering the floor.
+		createdAt, err := time.Parse(time.RFC3339, *fills[i].CreatedAt)
+		if err != nil {
+			return fmt.Errorf("dydx: fill createdAt %q: %w", *fills[i].CreatedAt, err)
+		}
+		if createdAt.After(newest) {
+			newest = createdAt
+		}
+	}
+
 	e.stateMu.Lock()
 	for i := range fills {
 		e.rememberFillLocked(*fills[i].ID)
-		if createdAt, err := time.Parse(time.RFC3339, *fills[i].CreatedAt); err == nil &&
-			createdAt.After(newest) {
-			newest = createdAt
-		}
 	}
 	e.fillFloor, e.fillFloorSet = newest, true
 	e.stateMu.Unlock()
