@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of dydxprotocol/subaccounts/subaccount.proto.
+// Only the messages godex signs or decodes are declared; field numbers and
+// types match the upstream definition exactly.
+package dydxprotocol.subaccounts;
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/dydxprotocol/subaccounts";
+
+// SubaccountId uniquely identifies a subaccount of an owner address.
+message SubaccountId {
+  string owner = 1;
+  uint32 number = 2;
+}

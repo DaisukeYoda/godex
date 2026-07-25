@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of cosmos/tx/v1beta1/tx.proto: exactly the
+// envelope needed to build, sign (SIGN_MODE_DIRECT), and broadcast a
+// transaction. Multi-signature and tip support are omitted — godex signs with a
+// single key.
+package cosmos.tx.v1beta1;
+
+import "cosmos/base/v1beta1/coin.proto";
+import "cosmos/tx/signing/v1beta1/signing.proto";
+import "google/protobuf/any.proto";
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/cosmos/tx/v1beta1";
+
+// TxBody is the body of a transaction.
+message TxBody {
+  repeated google.protobuf.Any messages = 1;
+  string memo = 2;
+  uint64 timeout_height = 3;
+  repeated google.protobuf.Any extension_options = 1023;
+  repeated google.protobuf.Any non_critical_extension_options = 2047;
+}
+
+// AuthInfo describes the signers and the fee.
+message AuthInfo {
+  repeated SignerInfo signer_infos = 1;
+  Fee fee = 2;
+}
+
+// SignerInfo describes a single signer.
+message SignerInfo {
+  google.protobuf.Any public_key = 1;
+  ModeInfo mode_info = 2;
+  uint64 sequence = 3;
+}
+
+// ModeInfo describes how a signer signed. godex only ever sets `single`.
+message ModeInfo {
+  message Single {
+    cosmos.tx.signing.v1beta1.SignMode mode = 1;
+  }
+
+  oneof sum {
+    Single single = 1;
+  }
+}
+
+// Fee is the transaction fee and gas limit.
+message Fee {
+  repeated cosmos.base.v1beta1.Coin amount = 1;
+  uint64 gas_limit = 2;
+  string payer = 3;
+  string granter = 4;
+}
+
+// TxRaw is the broadcast wire format: the exact signed body and auth info
+// bytes plus the signatures over them.
+message TxRaw {
+  bytes body_bytes = 1;
+  bytes auth_info_bytes = 2;
+  repeated bytes signatures = 3;
+}
+
+// SignDoc is what a SIGN_MODE_DIRECT signature commits to.
+message SignDoc {
+  bytes body_bytes = 1;
+  bytes auth_info_bytes = 2;
+  string chain_id = 3;
+  uint64 account_number = 4;
+}

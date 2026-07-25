@@ -1,0 +1,11 @@
+version: v2
+modules:
+  - path: proto
+lint:
+  use:
+    - STANDARD
+  except:
+    # These packages mirror upstream dYdX and Cosmos SDK definitions verbatim.
+    # The package name is what the chain resolves type URLs by, so it cannot be
+    # renamed to satisfy the version-suffix convention.
+    - PACKAGE_VERSION_SUFFIX

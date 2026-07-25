@@ -4,6 +4,8 @@ go 1.24
 
 require github.com/gorilla/websocket v1.5.3
 
+require google.golang.org/protobuf v1.36.5 // indirect
+
 require (
 	github.com/bits-and-blooms/bitset v1.17.0 // indirect
 	github.com/consensys/bavard v0.1.22 // indirect

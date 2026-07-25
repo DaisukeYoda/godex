@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of dydxprotocol/clob/order.proto. godex only
+// places short-term orders, so the conditional/TWAP/builder-code fields are
+// omitted; the fields that remain carry their upstream numbers and types so the
+// encoding is byte-identical to the chain's own.
+package dydxprotocol.clob;
+
+import "dydxprotocol/subaccounts/subaccount.proto";
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/dydxprotocol/clob";
+
+// OrderId uniquely identifies an order.
+message OrderId {
+  dydxprotocol.subaccounts.SubaccountId subaccount_id = 1;
+  fixed32 client_id = 2;
+  // order_flags is 0 for short-term, 32 for conditional, 64 for long-term.
+  uint32 order_flags = 3;
+  uint32 clob_pair_id = 4;
+}
+
+// Order is a single CLOB order.
+message Order {
+  OrderId order_id = 1;
+  Side side = 2;
+  uint64 quantums = 3;
+  uint64 subticks = 4;
+
+  oneof good_til_oneof {
+    // good_til_block applies to short-term orders.
+    uint32 good_til_block = 5;
+    // good_til_block_time applies to stateful orders (unix seconds).
+    fixed32 good_til_block_time = 6;
+  }
+
+  TimeInForce time_in_force = 7;
+  bool reduce_only = 8;
+  uint32 client_metadata = 9;
+  ConditionType condition_type = 10;
+  uint64 conditional_order_trigger_subticks = 11;
+}
+
+// Side is the order side.
+enum Side {
+  SIDE_UNSPECIFIED = 0;
+  SIDE_BUY = 1;
+  SIDE_SELL = 2;
+}
+
+// TimeInForce selects the order's execution semantics.
+enum TimeInForce {
+  // Default: match against the book, rest the remainder as a maker order.
+  TIME_IN_FORCE_UNSPECIFIED = 0;
+  TIME_IN_FORCE_IOC = 1;
+  TIME_IN_FORCE_POST_ONLY = 2;
+  TIME_IN_FORCE_FILL_OR_KILL = 3;
+}
+
+// ConditionType is the trigger condition of a conditional order.
+enum ConditionType {
+  CONDITION_TYPE_UNSPECIFIED = 0;
+  CONDITION_TYPE_STOP_LOSS = 1;
+  CONDITION_TYPE_TAKE_PROFIT = 2;
+}
