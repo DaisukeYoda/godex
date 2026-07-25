@@ -18,8 +18,13 @@ import (
 // VenueID identifies a supported venue.
 type VenueID string
 
-// VenueLighter is the Lighter (zkLighter) venue.
-const VenueLighter VenueID = "lighter"
+// Supported venues.
+const (
+	// VenueLighter is the Lighter (zkLighter) venue.
+	VenueLighter VenueID = "lighter"
+	// VenueDydx is the dYdX v4 venue.
+	VenueDydx VenueID = "dydx"
+)
 
 // ExecutionMetadata is venue market metadata resolved during Connect.
 type ExecutionMetadata struct {

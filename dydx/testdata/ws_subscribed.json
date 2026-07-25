@@ -1,0 +1,43 @@
+{
+  "type": "subscribed",
+  "connection_id": "c5a28fa5-4c05-4b40-a3d1-1f1d6f0b0e0f",
+  "message_id": 1,
+  "channel": "v4_subaccounts",
+  "id": "dydx1nduq8yy8h4nr7g9vuuglzklqatmaquq9zm99js/0",
+  "contents": {
+    "subaccount": {
+      "address": "dydx1nduq8yy8h4nr7g9vuuglzklqatmaquq9zm99js",
+      "subaccountNumber": 0,
+      "equity": "10000.500000",
+      "freeCollateral": "9200.250000",
+      "openPerpetualPositions": {
+        "ETH-USD": {
+          "market": "ETH-USD",
+          "status": "OPEN",
+          "side": "LONG",
+          "size": "0.500",
+          "maxSize": "0.500",
+          "entryPrice": "3000.0",
+          "realizedPnl": "0",
+          "unrealizedPnl": "12.700000",
+          "createdAt": "2026-07-25T11:00:00.000Z",
+          "createdAtHeight": "38102341",
+          "netFunding": "0",
+          "subaccountNumber": 0
+        }
+      },
+      "assetPositions": {
+        "USDC": {
+          "symbol": "USDC",
+          "side": "LONG",
+          "size": "10000.5",
+          "assetId": "0",
+          "subaccountNumber": 0
+        }
+      },
+      "marginEnabled": true
+    },
+    "orders": [],
+    "blockHeight": "38102400"
+  }
+}
