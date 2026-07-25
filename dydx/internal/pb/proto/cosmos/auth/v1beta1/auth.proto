@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of cosmos/auth/v1beta1/{auth,query}.proto:
+// enough to ask a validator for an address's account number and sequence via
+// CometBFT abci_query, which is how godex avoids depending on a Cosmos LCD host.
+package cosmos.auth.v1beta1;
+
+import "google/protobuf/any.proto";
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/cosmos/auth/v1beta1";
+
+// BaseAccount is the standard account type.
+message BaseAccount {
+  string address = 1;
+  google.protobuf.Any pub_key = 2;
+  uint64 account_number = 3;
+  uint64 sequence = 4;
+}
+
+// QueryAccountRequest is the abci_query payload for
+// /cosmos.auth.v1beta1.Query/Account.
+message QueryAccountRequest {
+  string address = 1;
+}
+
+// QueryAccountResponse wraps the account in an Any (a BaseAccount for trading
+// addresses).
+message QueryAccountResponse {
+  google.protobuf.Any account = 1;
+}

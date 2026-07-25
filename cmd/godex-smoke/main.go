@@ -7,9 +7,15 @@
 //	  go run ./cmd/godex-smoke -venue lighter -network testnet \
 //	  -market-id 2 -symbol SOL-PERP -size 0.200 [-wait-fill] [-reconnect-check] [-record path.jsonl]
 //
-// Credentials must be venue-scoped trading API keys — never L1 master keys —
-// and should be testnet-only. -record streams the raw account WS frames to a
-// JSONL file (fixture refresh, auth-expiry observation).
+//	DYDX_PRIVATE_KEY_HEX=... DYDX_ADDRESS=dydx1... [DYDX_SUBACCOUNT_NUMBER=0] \
+//	[DYDX_AUTHENTICATOR_ID=1] \
+//	  go run ./cmd/godex-smoke -venue dydx -network testnet \
+//	  -ticker ETH-USD -symbol ETH-PERP -size 0.010 [-wait-fill] [-reconnect-check]
+//
+// Markets are named per venue: Lighter takes a numeric -market-id, dYdX a
+// -ticker. Credentials must be venue-scoped trading keys — never L1 master keys
+// — and should be testnet-only. -record streams the raw account WS frames to a
+// JSONL file (fixture refresh, auth-expiry observation); it is Lighter-only.
 package main
 
 import (
@@ -23,11 +29,13 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
+	"github.com/DaisukeYoda/godex/dydx"
 	"github.com/DaisukeYoda/godex/lighter"
 	"github.com/DaisukeYoda/godex/smoketest"
 	lighterclient "github.com/elliottech/lighter-go/client"
@@ -37,6 +45,7 @@ import (
 
 const (
 	venueLighter = "lighter"
+	venueDydx    = "dydx"
 
 	// Body-level success code of the Lighter REST API.
 	lighterRESTSuccessCode = 200
@@ -52,6 +61,7 @@ type options struct {
 	venue          string
 	network        string
 	marketID       int64
+	ticker         string
 	symbol         string
 	size           decimal.Decimal
 	waitFill       bool
@@ -77,16 +87,19 @@ func run() error {
 	switch opts.venue {
 	case venueLighter:
 		return runLighter(ctx, opts)
+	case venueDydx:
+		return runDydx(ctx, opts)
 	default:
-		return fmt.Errorf("unknown venue %q (supported: %s)", opts.venue, venueLighter)
+		return fmt.Errorf("unknown venue %q (supported: %s, %s)", opts.venue, venueLighter, venueDydx)
 	}
 }
 
 func parseFlags(args []string) (options, error) {
 	flags := flag.NewFlagSet("godex-smoke", flag.ContinueOnError)
-	venue := flags.String("venue", "", "venue to test (required; supported: lighter)")
+	venue := flags.String("venue", "", "venue to test (required; supported: lighter, dydx)")
 	network := flags.String("network", "", "testnet or mainnet (required; use testnet)")
-	marketID := flags.Int64("market-id", -1, "venue market index (required; e.g. Lighter SOL testnet = 2)")
+	marketID := flags.Int64("market-id", -1, "Lighter market index (required for -venue lighter; e.g. SOL testnet = 2)")
+	ticker := flags.String("ticker", "", "dYdX market ticker (required for -venue dydx; e.g. ETH-USD)")
 	symbol := flags.String("symbol", "", "normalized symbol label (required; e.g. SOL-PERP)")
 	size := flags.String("size", "", "order size as a decimal string (required; e.g. 0.200)")
 	waitFill := flags.Bool("wait-fill", false, "also wait for a natural near-touch maker fill")
@@ -95,8 +108,20 @@ func parseFlags(args []string) (options, error) {
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
 	}
-	if *venue == "" || *network == "" || *marketID < 0 || *symbol == "" || *size == "" {
-		return options{}, fmt.Errorf("missing required flags: -venue, -network, -market-id, -symbol, -size are all required")
+	if *venue == "" || *network == "" || *symbol == "" || *size == "" {
+		return options{}, fmt.Errorf("missing required flags: -venue, -network, -symbol, -size are all required")
+	}
+	// Markets are identified differently per venue, so the identifying flag is
+	// required per venue rather than globally.
+	switch *venue {
+	case venueLighter:
+		if *marketID < 0 {
+			return options{}, fmt.Errorf("-market-id is required for -venue %s", venueLighter)
+		}
+	case venueDydx:
+		if *ticker == "" {
+			return options{}, fmt.Errorf("-ticker is required for -venue %s", venueDydx)
+		}
 	}
 	sizeDecimal, err := decimal.FromDecimalString(*size)
 	if err != nil {
@@ -106,6 +131,7 @@ func parseFlags(args []string) (options, error) {
 		venue:          *venue,
 		network:        *network,
 		marketID:       *marketID,
+		ticker:         *ticker,
 		symbol:         *symbol,
 		size:           sizeDecimal,
 		waitFill:       *waitFill,
@@ -352,4 +378,163 @@ func startRecorder(ctx context.Context, opts options, network lighter.Network, c
 		<-readerDone
 		_ = file.Close()
 	}, nil
+}
+
+func loadDydxCredentials() (dydx.Credentials, error) {
+	privateKey, err := requireEnv("DYDX_PRIVATE_KEY_HEX")
+	if err != nil {
+		return dydx.Credentials{}, err
+	}
+	address, err := requireEnv("DYDX_ADDRESS")
+	if err != nil {
+		return dydx.Credentials{}, err
+	}
+	// The default subaccount is 0, so this one is optional.
+	subaccountNumber := uint64(0)
+	if raw := os.Getenv("DYDX_SUBACCOUNT_NUMBER"); raw != "" {
+		subaccountNumber, err = strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			return dydx.Credentials{}, fmt.Errorf("invalid DYDX_SUBACCOUNT_NUMBER: %w", err)
+		}
+	}
+	authenticatorID, err := parseAuthenticatorID(os.Getenv("DYDX_AUTHENTICATOR_ID"))
+	if err != nil {
+		return dydx.Credentials{}, err
+	}
+	return dydx.Credentials{
+		PrivateKeyHex:    privateKey,
+		Address:          address,
+		SubaccountNumber: uint32(subaccountNumber),
+		AuthenticatorID:  authenticatorID,
+	}, nil
+}
+
+// parseAuthenticatorID reads the id of the on-chain authenticator that
+// authorizes a scoped trading key. Empty means the key signs as the account
+// owner itself. The chain takes one authenticator per message, so compose any
+// restrictions into a single AllOf authenticator and name that one here.
+func parseAuthenticatorID(raw string) (*uint64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	id, err := strconv.ParseUint(raw, 10, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DYDX_AUTHENTICATOR_ID %q: %w", raw, err)
+	}
+	return &id, nil
+}
+
+func runDydx(ctx context.Context, opts options) error {
+	credentials, err := loadDydxCredentials()
+	if err != nil {
+		return err
+	}
+	network := dydx.Network(opts.network)
+	indexerBaseURL, err := network.IndexerRESTBaseURL()
+	if err != nil {
+		return err
+	}
+
+	executor, err := dydx.New(dydx.Config{
+		Credentials: credentials,
+		Symbol:      godex.Symbol(opts.symbol),
+		Ticker:      opts.ticker,
+		Network:     network,
+	})
+	if err != nil {
+		return err
+	}
+	if opts.recordPath != "" {
+		logf("note: -record is Lighter-only and is ignored for %s", venueDydx)
+	}
+
+	cfg := smoketest.Config{
+		Symbol: godex.Symbol(opts.symbol),
+		Size:   opts.size,
+		FetchTOB: func(ctx context.Context) (smoketest.TOB, error) {
+			return fetchDydxTOB(ctx, indexerBaseURL, opts.ticker)
+		},
+		Logf:     logf,
+		WaitFill: opts.waitFill,
+	}
+	if opts.reconnectCheck {
+		cfg.ForceReconnect = executor.ForceReconnect
+	}
+	if err := smoketest.Run(ctx, executor, cfg); err != nil {
+		return err
+	}
+	logf("all adoption gates passed")
+	return nil
+}
+
+// fetchDydxTOB reads the venue's top of book from the Indexer's public order
+// book endpoint (outside the executor contract, so the harness fetches it
+// directly). The venue returns unsorted price levels, so the best bid and ask
+// are the maximum and minimum rather than the first entries.
+func fetchDydxTOB(ctx context.Context, indexerBaseURL, ticker string) (smoketest.TOB, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, tobRequestTimeout)
+	defer cancel()
+	url := fmt.Sprintf("%s/orderbooks/perpetualMarket/%s", indexerBaseURL, ticker)
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodGet, url, nil)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return smoketest.TOB{}, fmt.Errorf("orderbooks failed: HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	var book struct {
+		Bids []struct {
+			Price *string `json:"price"`
+		} `json:"bids"`
+		Asks []struct {
+			Price *string `json:"price"`
+		} `json:"asks"`
+	}
+	if err := json.Unmarshal(body, &book); err != nil {
+		return smoketest.TOB{}, fmt.Errorf("orderbooks returned malformed JSON: %w", err)
+	}
+	bestBid, err := extremePrice(book.Bids, 1)
+	if err != nil {
+		return smoketest.TOB{}, fmt.Errorf("bids: %w", err)
+	}
+	bestAsk, err := extremePrice(book.Asks, -1)
+	if err != nil {
+		return smoketest.TOB{}, fmt.Errorf("asks: %w", err)
+	}
+	return smoketest.TOB{BestBid: bestBid, BestAsk: bestAsk}, nil
+}
+
+// extremePrice returns the highest (direction 1) or lowest (direction -1) price
+// in a book side.
+func extremePrice(levels []struct {
+	Price *string `json:"price"`
+}, direction int) (decimal.Decimal, error) {
+	var best decimal.Decimal
+	found := false
+	for _, level := range levels {
+		if level.Price == nil {
+			return decimal.Decimal{}, fmt.Errorf("price level is missing a price")
+		}
+		price, err := decimal.FromDecimalString(*level.Price)
+		if err != nil {
+			return decimal.Decimal{}, err
+		}
+		if !found || price.Cmp(best)*direction > 0 {
+			best, found = price, true
+		}
+	}
+	if !found {
+		return decimal.Decimal{}, fmt.Errorf("empty order book side")
+	}
+	return best, nil
 }

@@ -1,0 +1,39 @@
+{
+  "pageSize": 100,
+  "totalResults": 2,
+  "offset": 0,
+  "fills": [
+    {
+      "id": "9a5f8a0e-1c4b-4c2f-9f2a-6d4a1b0c7e31",
+      "side": "BUY",
+      "liquidity": "TAKER",
+      "type": "LIMIT",
+      "market": "ETH-USD",
+      "marketType": "PERPETUAL",
+      "price": "3010.2",
+      "size": "0.100",
+      "fee": "0.150510",
+      "createdAt": "2026-07-25T11:05:03.421Z",
+      "createdAtHeight": "38102431",
+      "orderId": "3b1f6d24-9a2e-5d3c-8b71-0c9e4a2f1d55",
+      "clientMetadata": "0",
+      "subaccountNumber": 0
+    },
+    {
+      "id": "1f0c7e31-9a5f-4c2f-8a0e-6d4a1b0c9a5f",
+      "side": "SELL",
+      "liquidity": "MAKER",
+      "type": "LIMIT",
+      "market": "ETH-USD",
+      "marketType": "PERPETUAL",
+      "price": "3020.9",
+      "size": "0.050",
+      "fee": "-0.007552",
+      "createdAt": "2026-07-25T11:06:44.902Z",
+      "createdAtHeight": "38102534",
+      "orderId": "0c9e4a2f-1d55-4b71-8d3c-3b1f6d249a2e",
+      "clientMetadata": "0",
+      "subaccountNumber": 0
+    }
+  ]
+}

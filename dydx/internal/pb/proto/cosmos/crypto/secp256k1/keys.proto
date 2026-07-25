@@ -1,0 +1,12 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of cosmos/crypto/secp256k1/keys.proto.
+package cosmos.crypto.secp256k1;
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/cosmos/crypto/secp256k1";
+
+// PubKey is a compressed (33-byte) secp256k1 public key.
+// Type URL: /cosmos.crypto.secp256k1.PubKey.
+message PubKey {
+  bytes key = 1;
+}

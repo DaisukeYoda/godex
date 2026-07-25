@@ -1,0 +1,50 @@
+{
+  "markets": {
+    "ETH-USD": {
+      "clobPairId": "1",
+      "ticker": "ETH-USD",
+      "status": "ACTIVE",
+      "oraclePrice": "3025.4",
+      "priceChange24H": "12.3",
+      "volume24H": "128374234.9",
+      "trades24H": 92341,
+      "nextFundingRate": "0.0000012",
+      "initialMarginFraction": "0.05",
+      "maintenanceMarginFraction": "0.03",
+      "openInterest": "12345.678",
+      "atomicResolution": -9,
+      "quantumConversionExponent": -9,
+      "tickSize": "0.1",
+      "stepSize": "0.001",
+      "stepBaseQuantums": 1000000,
+      "subticksPerTick": 100000,
+      "marketType": "CROSS"
+    },
+    "BTC-USD": {
+      "clobPairId": "0",
+      "ticker": "BTC-USD",
+      "status": "ACTIVE",
+      "initialMarginFraction": "0.05",
+      "maintenanceMarginFraction": "0.03",
+      "atomicResolution": -10,
+      "quantumConversionExponent": -9,
+      "tickSize": "1",
+      "stepSize": "0.0001",
+      "stepBaseQuantums": 1000000,
+      "subticksPerTick": 100000,
+      "marketType": "CROSS"
+    },
+    "PAUSED-USD": {
+      "clobPairId": "77",
+      "ticker": "PAUSED-USD",
+      "status": "PAUSED",
+      "maintenanceMarginFraction": "0.03",
+      "atomicResolution": -9,
+      "quantumConversionExponent": -9,
+      "tickSize": "0.1",
+      "stepSize": "0.001",
+      "stepBaseQuantums": 1000000,
+      "subticksPerTick": 100000
+    }
+  }
+}

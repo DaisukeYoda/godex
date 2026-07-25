@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of dydxprotocol/clob/tx.proto: the two
+// messages godex submits.
+package dydxprotocol.clob;
+
+import "dydxprotocol/clob/order.proto";
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/dydxprotocol/clob";
+
+// MsgPlaceOrder places an order. Type URL: /dydxprotocol.clob.MsgPlaceOrder.
+message MsgPlaceOrder {
+  Order order = 1;
+}
+
+// MsgCancelOrder cancels an order. Type URL: /dydxprotocol.clob.MsgCancelOrder.
+message MsgCancelOrder {
+  OrderId order_id = 1;
+
+  oneof good_til_oneof {
+    // good_til_block applies to short-term orders.
+    uint32 good_til_block = 2;
+    // good_til_block_time applies to stateful orders (unix seconds).
+    fixed32 good_til_block_time = 3;
+  }
+}

@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+// Trimmed, wire-compatible subset of dydxprotocol/accountplus/tx.proto. godex
+// only needs TxExtension, which names the on-chain authenticators that
+// authorize a transaction signed by a scoped trading key. Registering those
+// authenticators (MsgAddAuthenticator) is deliberately out of scope.
+package dydxprotocol.accountplus;
+
+option go_package = "github.com/DaisukeYoda/godex/dydx/internal/pb/dydxprotocol/accountplus";
+
+// TxExtension rides in TxBody.non_critical_extension_options.
+// Type URL: /dydxprotocol.accountplus.TxExtension.
+message TxExtension {
+  repeated uint64 selected_authenticators = 1;
+}

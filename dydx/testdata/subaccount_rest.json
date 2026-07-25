@@ -1,0 +1,36 @@
+{
+  "subaccount": {
+    "address": "dydx1nduq8yy8h4nr7g9vuuglzklqatmaquq9zm99js",
+    "subaccountNumber": 0,
+    "equity": "10000.500000",
+    "freeCollateral": "9200.250000",
+    "openPerpetualPositions": {
+      "ETH-USD": {
+        "market": "ETH-USD",
+        "status": "OPEN",
+        "side": "LONG",
+        "size": "0.500",
+        "maxSize": "0.500",
+        "entryPrice": "3000.0",
+        "realizedPnl": "0",
+        "unrealizedPnl": "12.700000",
+        "createdAt": "2026-07-25T11:00:00.000Z",
+        "createdAtHeight": "38102341",
+        "netFunding": "0",
+        "subaccountNumber": 0
+      }
+    },
+    "assetPositions": {
+      "USDC": {
+        "symbol": "USDC",
+        "side": "LONG",
+        "size": "10000.5",
+        "assetId": "0",
+        "subaccountNumber": 0
+      }
+    },
+    "marginEnabled": true,
+    "updatedAtHeight": "38102400",
+    "latestProcessedBlockHeight": "38102400"
+  }
+}

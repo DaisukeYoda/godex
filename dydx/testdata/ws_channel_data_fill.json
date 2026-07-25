@@ -1,0 +1,46 @@
+{
+  "type": "channel_data",
+  "connection_id": "c5a28fa5-4c05-4b40-a3d1-1f1d6f0b0e0f",
+  "message_id": 7,
+  "channel": "v4_subaccounts",
+  "id": "dydx1nduq8yy8h4nr7g9vuuglzklqatmaquq9zm99js/0",
+  "version": "1.0.0",
+  "contents": {
+    "fills": [
+      {
+        "id": "9a5f8a0e-1c4b-4c2f-9f2a-6d4a1b0c7e31",
+        "subaccountId": "8a1c1f22-51a1-5f8a-9f26-2f6d1a0b7c31",
+        "side": "BUY",
+        "liquidity": "TAKER",
+        "type": "LIMIT",
+        "market": "ETH-USD",
+        "marketType": "PERPETUAL",
+        "price": "3010.2",
+        "size": "0.100",
+        "fee": "0.150510",
+        "createdAt": "2026-07-25T11:05:03.421Z",
+        "createdAtHeight": "38102431",
+        "orderId": "3b1f6d24-9a2e-5d3c-8b71-0c9e4a2f1d55",
+        "clientMetadata": "0",
+        "subaccountNumber": 0
+      }
+    ],
+    "perpetualPositions": [
+      {
+        "address": "dydx1nduq8yy8h4nr7g9vuuglzklqatmaquq9zm99js",
+        "subaccountNumber": 0,
+        "positionId": "1d2c3b4a-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
+        "market": "ETH-USD",
+        "side": "LONG",
+        "status": "OPEN",
+        "size": "0.600",
+        "maxSize": "0.600",
+        "entryPrice": "3001.7",
+        "realizedPnl": "0",
+        "unrealizedPnl": "14.300000",
+        "netFunding": "0"
+      }
+    ],
+    "blockHeight": "38102431"
+  }
+}

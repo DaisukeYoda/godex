@@ -18,8 +18,13 @@ import (
 // VenueID identifies a supported venue.
 type VenueID string
 
-// VenueLighter is the Lighter (zkLighter) venue.
-const VenueLighter VenueID = "lighter"
+// Supported venues.
+const (
+	// VenueLighter is the Lighter (zkLighter) venue.
+	VenueLighter VenueID = "lighter"
+	// VenueDydx is the dYdX v4 venue.
+	VenueDydx VenueID = "dydx"
+)
 
 // ExecutionMetadata is venue market metadata resolved during Connect.
 type ExecutionMetadata struct {
@@ -60,6 +65,11 @@ var (
 //   - Authenticated account-stream fills are the only source of truth for
 //     executions. Adapters never infer fills or positions from book state.
 //   - Price tick and size step rounding are the adapter's responsibility.
+//
+// Concurrency: Connect must return before any other method is called — it
+// resolves the market metadata and signer the other methods read, and nothing
+// else establishes that ordering. Afterwards PlaceOrder, CancelOrder, and
+// AccountEvents are safe to use concurrently, and Close is terminal.
 //
 // Event ordering contract (AccountEvents):
 //   - ConnectedEvent and DisconnectedEvent alternate, including across

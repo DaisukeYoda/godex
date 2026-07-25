@@ -1,0 +1,33 @@
+{
+  "type": "channel_data",
+  "connection_id": "c5a28fa5-4c05-4b40-a3d1-1f1d6f0b0e0f",
+  "message_id": 12,
+  "channel": "v4_subaccounts",
+  "id": "dydx1nduq8yy8h4nr7g9vuuglzklqatmaquq9zm99js/0",
+  "version": "1.0.0",
+  "contents": {
+    "orders": [
+      {
+        "id": "7c2b9e41-3a5d-4f18-9d0b-1a2c3e4f5a6b",
+        "subaccountId": "8a1c1f22-51a1-5f8a-9f26-2f6d1a0b7c31",
+        "clientId": "1700000042",
+        "clobPairId": "1",
+        "side": "BUY",
+        "size": "0.100",
+        "totalFilled": "0",
+        "price": "2500.0",
+        "type": "LIMIT",
+        "status": "CANCELED",
+        "timeInForce": "POST_ONLY",
+        "reduceOnly": false,
+        "orderFlags": "0",
+        "goodTilBlock": "38102446",
+        "postOnly": true,
+        "ticker": "ETH-USD",
+        "removalReason": "ORDER_REMOVAL_REASON_EXPIRED",
+        "subaccountNumber": 0
+      }
+    ],
+    "blockHeight": "38102447"
+  }
+}

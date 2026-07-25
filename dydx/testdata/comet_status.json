@@ -1,0 +1,20 @@
+{
+  "jsonrpc": "2.0",
+  "id": -1,
+  "result": {
+    "node_info": {
+      "network": "dydx-testnet-4",
+      "version": "0.38.6",
+      "moniker": "godex-test"
+    },
+    "sync_info": {
+      "latest_block_hash": "3F2A1B0C9E4A2F1D55A2E5D3C8B710C9E4A2F1D5",
+      "latest_block_height": "38102400",
+      "latest_block_time": "2026-07-25T11:04:59.812Z",
+      "catching_up": false
+    },
+    "validator_info": {
+      "voting_power": "0"
+    }
+  }
+}
