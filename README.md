@@ -184,6 +184,10 @@ account WS frames to JSONL for fixture refresh (Lighter only).
 
 - `hyperliquid` adapter (EIP-712 actions, agent wallets)
 
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md).
+
 ## License
 
 MIT
