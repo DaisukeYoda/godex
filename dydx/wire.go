@@ -264,11 +264,27 @@ type fill struct {
 	Price     *string `json:"price"`
 	Size      *string `json:"size"`
 	CreatedAt *string `json:"createdAt"`
-	// ClientMetadata and OrderID identify the originating order. The Indexer
-	// reports its own order id, not the client id, so fills are attributed via
-	// the executor's order table.
+	// OrderID is the Indexer's own order id, not the client id, so fills are
+	// attributed via the executor's order table. It is absent on the offsetting
+	// fills a deleveraging produces, which belong to no order at all.
 	OrderID *string `json:"orderId"`
-	Market  *string `json:"market"`
+	// The venue names the market differently by transport: REST fills carry
+	// "market", stream fills carry "ticker". Either one identifies it, and one
+	// of them is always present (testnet capture, 2026-07-27).
+	Market *string `json:"market"`
+	Ticker *string `json:"ticker"`
+}
+
+// marketTicker returns the market this fill belongs to, whichever field the
+// transport used to name it.
+func (f *fill) marketTicker() string {
+	if f.Market != nil {
+		return *f.Market
+	}
+	if f.Ticker != nil {
+		return *f.Ticker
+	}
+	return ""
 }
 
 func (f *fill) validate() error {
@@ -280,9 +296,9 @@ func (f *fill) validate() error {
 		fieldCheck{"size", f.Size != nil},
 		fieldCheck{"createdAt", f.CreatedAt != nil},
 		// A subaccount can trade several markets, and FillEvent carries no
-		// market of its own — so without this the executor cannot tell its own
-		// executions from another market's.
-		fieldCheck{"market", f.Market != nil},
+		// market of its own — so without one of these the executor cannot tell
+		// its own executions from another market's.
+		fieldCheck{"market or ticker", f.Market != nil || f.Ticker != nil},
 	); err != nil {
 		return err
 	}

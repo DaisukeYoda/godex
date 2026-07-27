@@ -210,15 +210,15 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 	if _, err := collector.WaitFor(ctx, iocMark, cfg.EventTimeout, "ioc fill", isFillFor(iocAck.OrderID)); err != nil {
 		return err
 	}
-	longEvent, err := collector.WaitFor(ctx, iocMark, cfg.EventTimeout, "long position reflected", isPositionWithSign(1))
-	if err != nil {
+	if _, err := collector.WaitFor(ctx, iocMark, cfg.EventTimeout,
+		"long position reflected", isPositionWithSign(1)); err != nil {
 		return err
 	}
 	pass("ioc fill + long position")
 
 	// Gate 5 (optional): reconnect while holding the position.
 	if cfg.ForceReconnect != nil {
-		if err := runReconnectGate(ctx, collector, cfg, longEvent.(godex.PositionEvent).Position); err != nil {
+		if err := runReconnectGate(ctx, collector, cfg); err != nil {
 			return err
 		}
 		pass("reconnect: alternation + snapshot convergence")
@@ -268,24 +268,49 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 	return nil
 }
 
-func runReconnectGate(ctx context.Context, collector *Collector, cfg Config, before godex.Position) error {
-	mark := collector.Mark()
+func runReconnectGate(ctx context.Context, collector *Collector, cfg Config) error {
+	// Take the baseline and the search origin from one snapshot, so no event can
+	// slip between them and be counted as neither before nor after.
+	//
+	// The baseline is the most recently observed position, not one an earlier
+	// gate captured: an IOC that sweeps several price levels reports its fills —
+	// and the position growing between them — over successive updates, so the
+	// first long position is often not the final one.
+	observed := collector.Events()
+	mark := len(observed)
+	before, ok := latestPosition(observed)
+	if !ok {
+		return fmt.Errorf("smoketest: no position observed before the forced reconnect")
+	}
+
 	if err := cfg.ForceReconnect(); err != nil {
 		return fmt.Errorf("smoketest: force reconnect: %w", err)
 	}
-	if _, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "disconnected after forced reconnect", isDisconnected); err != nil {
-		return err
-	}
-	if _, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "reconnected", isConnected); err != nil {
-		return err
-	}
-	positionEvent, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "post-reconnect position snapshot", isPosition)
+
+	// Walk the reconnect in order. Each step starts strictly after the previous
+	// match, so a late update from before the drop cannot stand in for the
+	// snapshot the venue sends after it — which is the only thing that proves
+	// local state re-converged.
+	_, disconnectedAt, err := collector.WaitForAt(ctx, mark, cfg.EventTimeout,
+		"disconnected after forced reconnect", isDisconnected)
 	if err != nil {
 		return err
 	}
-	if _, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "post-reconnect margin snapshot", isMargin); err != nil {
+	_, connectedAt, err := collector.WaitForAt(ctx, disconnectedAt+1, cfg.EventTimeout,
+		"reconnected", isConnected)
+	if err != nil {
 		return err
 	}
+	positionEvent, _, err := collector.WaitForAt(ctx, connectedAt+1, cfg.EventTimeout,
+		"post-reconnect position snapshot", isPosition)
+	if err != nil {
+		return err
+	}
+	if _, _, err := collector.WaitForAt(ctx, connectedAt+1, cfg.EventTimeout,
+		"post-reconnect margin snapshot", isMargin); err != nil {
+		return err
+	}
+
 	after := positionEvent.(godex.PositionEvent).Position
 	if after.Size.Cmp(before.Size) != 0 {
 		return fmt.Errorf("smoketest: post-reconnect position diverged: before=%s after=%s", before.Size, after.Size)
@@ -339,6 +364,16 @@ func runNaturalFillGate(ctx context.Context, exec godex.VenueExecutor, collector
 }
 
 // scalePrice multiplies price by a factor string, keeping price's scale.
+// latestPosition returns the most recently observed position.
+func latestPosition(events []godex.AccountEvent) (godex.Position, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if position, ok := events[i].(godex.PositionEvent); ok {
+			return position.Position, true
+		}
+	}
+	return godex.Position{}, false
+}
+
 func scalePrice(price decimal.Decimal, factor string) decimal.Decimal {
 	return price.MulToScale(decimal.MustFromString(factor, factorScale), price.Scale())
 }

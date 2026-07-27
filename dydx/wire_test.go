@@ -156,8 +156,17 @@ func TestDecodeWsChannelDataFill(t *testing.T) {
 	if len(message.Contents.Fills) != 1 {
 		t.Fatalf("got %d fills, want 1", len(message.Contents.Fills))
 	}
-	if *message.Contents.Fills[0].ID != "9a5f8a0e-1c4b-4c2f-9f2a-6d4a1b0c7e31" {
-		t.Fatalf("fill id = %s", *message.Contents.Fills[0].ID)
+	entry := &message.Contents.Fills[0]
+	if *entry.ID != "9a5f8a0e-1c4b-4c2f-9f2a-6d4a1b0c7e31" {
+		t.Fatalf("fill id = %s", *entry.ID)
+	}
+	// The stream names the market "ticker"; REST names it "market". Either must
+	// resolve, or the executor cannot scope fills to its own market.
+	if entry.Market != nil {
+		t.Fatal("a stream fill carries ticker, not market")
+	}
+	if entry.marketTicker() != "ETH-USD" {
+		t.Fatalf("marketTicker = %q, want ETH-USD", entry.marketTicker())
 	}
 	// Incremental updates send positions as an array, not a ticker-keyed map.
 	if len(message.Contents.PerpetualPositions) != 1 {
@@ -198,12 +207,22 @@ func TestDecodeWsMessageRejectsUnknownAndErrorFrames(t *testing.T) {
 		{
 			name: "fill without id",
 			body: `{"type":"channel_data","channel":"v4_subaccounts","contents":{"fills":[
-				{"side":"BUY","price":"1","size":"1","createdAt":"2026-07-25T11:05:03.421Z"}]}}`,
+				{"side":"BUY","ticker":"ETH-USD","price":"1","size":"1",
+				 "createdAt":"2026-07-25T11:05:03.421Z"}]}}`,
+		},
+		{
+			// Without a market this executor cannot tell its own executions
+			// from another market's on the same subaccount.
+			name: "fill naming no market at all",
+			body: `{"type":"channel_data","channel":"v4_subaccounts","contents":{"fills":[
+				{"id":"a","side":"BUY","price":"1","size":"1",
+				 "createdAt":"2026-07-25T11:05:03.421Z"}]}}`,
 		},
 		{
 			name: "fill with unknown side",
 			body: `{"type":"channel_data","channel":"v4_subaccounts","contents":{"fills":[
-				{"id":"a","side":"LONG","price":"1","size":"1","createdAt":"2026-07-25T11:05:03.421Z"}]}}`,
+				{"id":"a","side":"LONG","ticker":"ETH-USD","price":"1","size":"1",
+				 "createdAt":"2026-07-25T11:05:03.421Z"}]}}`,
 		},
 		{
 			name: "position with unknown side",

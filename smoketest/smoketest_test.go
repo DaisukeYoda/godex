@@ -24,6 +24,13 @@ type fakeExecutor struct {
 	// misbehaviors under test
 	duplicateFillOnReconnect bool
 	acceptCrossingPostOnly   bool
+	// staleUpdateBeforeDrop emits a position that disagrees with the account's
+	// real one after the reconnect is requested but before the drop, imitating
+	// an update still in flight when the socket goes down.
+	staleUpdateBeforeDrop bool
+	// wrongPositionAfterReconnect makes the post-reconnect snapshot disagree
+	// with what was observed before the drop, which the gate must catch.
+	wrongPositionAfterReconnect bool
 
 	mu       sync.Mutex
 	seq      int
@@ -116,7 +123,26 @@ func (f *fakeExecutor) PlaceOrder(_ context.Context, order godex.NewOrder) (gode
 // fresh snapshot. The duplicate-fill misbehavior re-emits the last fill, which
 // the harness must catch.
 func (f *fakeExecutor) forceReconnect() error {
+	if f.staleUpdateBeforeDrop {
+		f.mu.Lock()
+		stale := f.position.Add(decimal.MustFromString("9.999", 3))
+		f.mu.Unlock()
+		f.events <- godex.PositionEvent{Position: godex.Position{
+			VenueID: fakeVenue, Symbol: "SOL-PERP", Size: stale,
+			EntryPrice:    decimal.MustFromString("100.0", 1),
+			UnrealizedPnL: decimal.MustFromString("0.0", 1),
+		}}
+		f.events <- godex.MarginEvent{
+			UsageRatio: decimal.MustFromString("0.0000", 4),
+			EquityUSD:  decimal.MustFromString("1000.00", 2),
+		}
+	}
 	f.events <- godex.DisconnectedEvent{VenueID: fakeVenue}
+	if f.wrongPositionAfterReconnect {
+		f.mu.Lock()
+		f.position = f.position.Add(decimal.MustFromString("5.000", 3))
+		f.mu.Unlock()
+	}
 	f.emitSnapshot()
 	f.mu.Lock()
 	lastFill := f.lastFill
@@ -158,6 +184,36 @@ func TestRunPassesWithHealthyExecutor(t *testing.T) {
 	fake := newFakeExecutor(decimal.MustFromString("80.100", 3))
 	if err := Run(context.Background(), fake, testConfig(t, fake, true)); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+}
+
+// TestRunIgnoresAStaleUpdateArrivingBeforeTheDrop: the reconnect gate proves
+// local state re-converged from the venue's snapshot, so only an event after
+// the reconnect can satisfy it. An update still in flight when the socket goes
+// down must not stand in for that snapshot.
+func TestRunIgnoresAStaleUpdateArrivingBeforeTheDrop(t *testing.T) {
+	fake := newFakeExecutor(decimal.MustFromString("80.100", 3))
+	fake.staleUpdateBeforeDrop = true
+	if err := Run(context.Background(), fake, testConfig(t, fake, true)); err != nil {
+		t.Fatalf("a stale pre-drop update must not fail the gate: %v", err)
+	}
+}
+
+// TestRunDetectsDivergentPositionAfterReconnect is the failure the gate exists
+// to catch, and it must survive a stale update that would otherwise be matched
+// in the snapshot's place.
+func TestRunDetectsDivergentPositionAfterReconnect(t *testing.T) {
+	for _, stale := range []bool{false, true} {
+		fake := newFakeExecutor(decimal.MustFromString("80.100", 3))
+		fake.wrongPositionAfterReconnect = true
+		fake.staleUpdateBeforeDrop = stale
+		err := Run(context.Background(), fake, testConfig(t, fake, true))
+		if err == nil {
+			t.Fatalf("staleUpdateBeforeDrop=%v: expected the divergence to be caught", stale)
+		}
+		if !strings.Contains(err.Error(), "position diverged") {
+			t.Fatalf("staleUpdateBeforeDrop=%v: got %v, want a divergence report", stale, err)
+		}
 	}
 }
 

@@ -1090,7 +1090,7 @@ func fillFrame(t *testing.T, fillID, venueOrderID, price, size string) []byte {
 		"type":    wsTypeChannelData,
 		"channel": subaccountsChannel,
 		"contents": map[string]any{
-			"fills": []any{fillObject(fillID, venueOrderID, price, size)},
+			"fills": []any{streamFillObject(fillID, venueOrderID, price, size)},
 		},
 	})
 	if err != nil {
@@ -1099,6 +1099,8 @@ func fillFrame(t *testing.T, fillID, venueOrderID, price, size string) []byte {
 	return frame
 }
 
+// fillObject builds a fill as the REST history reports one, which names the
+// market "market".
 func fillObject(fillID, venueOrderID, price, size string) map[string]any {
 	return map[string]any{
 		"id":        fillID,
@@ -1109,6 +1111,16 @@ func fillObject(fillID, venueOrderID, price, size string) map[string]any {
 		"createdAt": "2026-07-25T11:05:03.421Z",
 		"orderId":   venueOrderID,
 	}
+}
+
+// streamFillObject builds a fill as the account stream reports one. The venue
+// names the market "ticker" there, not "market" (testnet capture, 2026-07-27).
+func streamFillObject(fillID, venueOrderID, price, size string) map[string]any {
+	entry := fillObject(fillID, venueOrderID, price, size)
+	delete(entry, "market")
+	entry["ticker"] = testTicker
+	entry["clobPairId"] = "1"
+	return entry
 }
 
 // TestConnectDoesNotReplayHistoricalFills: the account's existing fills predate
@@ -1405,8 +1417,8 @@ func TestFillInAnotherMarketIsNotReportedAsOurs(t *testing.T) {
 	mustConnect(t, executor)
 
 	mark := collector.Mark()
-	foreign := fillObject("fill-btc", "venue-order-btc", "65000", "0.010")
-	foreign["market"] = "BTC-USD"
+	foreign := streamFillObject("fill-btc", "venue-order-btc", "65000", "0.010")
+	foreign["ticker"] = "BTC-USD"
 	frame, err := json.Marshal(map[string]any{
 		"type":     wsTypeChannelData,
 		"channel":  subaccountsChannel,

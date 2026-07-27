@@ -13,16 +13,26 @@
         "side": "BUY",
         "liquidity": "TAKER",
         "type": "LIMIT",
-        "market": "ETH-USD",
-        "marketType": "PERPETUAL",
+        "clobPairId": "1",
+        "ticker": "ETH-USD",
         "price": "3010.2",
         "size": "0.100",
+        "quoteAmount": "301.02",
         "fee": "0.150510",
+        "affiliateRevShare": "0",
+        "eventId": "04d878340000000200000002",
+        "transactionHash": "4EB3F9DE777C626D4B3C4056C348FABF854BBE0C5095BDFD5B73B18759A2F261",
         "createdAt": "2026-07-25T11:05:03.421Z",
         "createdAtHeight": "38102431",
         "orderId": "3b1f6d24-9a2e-5d3c-8b71-0c9e4a2f1d55",
         "clientMetadata": "0",
-        "subaccountNumber": 0
+        "entryPriceBefore": "3000.0",
+        "positionSizeBefore": "0.500",
+        "positionSideBefore": "LONG",
+        "builderAddress": null,
+        "builderFee": null,
+        "orderRouterAddress": null,
+        "orderRouterFee": null
       }
     ],
     "perpetualPositions": [
@@ -36,8 +46,11 @@
         "size": "0.600",
         "maxSize": "0.600",
         "entryPrice": "3001.7",
+        "exitPrice": null,
         "realizedPnl": "0",
         "unrealizedPnl": "14.300000",
+        "sumOpen": "0.600",
+        "sumClose": "0",
         "netFunding": "0"
       }
     ],
