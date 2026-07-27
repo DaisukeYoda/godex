@@ -59,6 +59,14 @@ func (c *Collector) Events() []godex.AccountEvent {
 
 // WaitFor blocks until an event at or after fromIndex satisfies predicate.
 func (c *Collector) WaitFor(ctx context.Context, fromIndex int, timeout time.Duration, label string, predicate func(godex.AccountEvent) bool) (godex.AccountEvent, error) {
+	event, _, err := c.WaitForAt(ctx, fromIndex, timeout, label, predicate)
+	return event, err
+}
+
+// WaitForAt is WaitFor, also reporting where the match landed. Checking an
+// ordered sequence means continuing strictly after the previous match, so that
+// an event which arrived before it cannot satisfy the next step.
+func (c *Collector) WaitForAt(ctx context.Context, fromIndex int, timeout time.Duration, label string, predicate func(godex.AccountEvent) bool) (godex.AccountEvent, int, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	cursor := fromIndex
@@ -66,9 +74,9 @@ func (c *Collector) WaitFor(ctx context.Context, fromIndex int, timeout time.Dur
 		c.mu.Lock()
 		for ; cursor < len(c.events); cursor++ {
 			if predicate(c.events[cursor]) {
-				event := c.events[cursor]
+				event, at := c.events[cursor], cursor
 				c.mu.Unlock()
-				return event, nil
+				return event, at, nil
 			}
 		}
 		updated := c.updated
@@ -76,9 +84,9 @@ func (c *Collector) WaitFor(ctx context.Context, fromIndex int, timeout time.Dur
 		select {
 		case <-updated:
 		case <-deadline.C:
-			return nil, fmt.Errorf("smoketest: timeout waiting for %s", label)
+			return nil, 0, fmt.Errorf("smoketest: timeout waiting for %s", label)
 		case <-ctx.Done():
-			return nil, fmt.Errorf("smoketest: canceled waiting for %s: %w", label, ctx.Err())
+			return nil, 0, fmt.Errorf("smoketest: canceled waiting for %s: %w", label, ctx.Err())
 		}
 	}
 }

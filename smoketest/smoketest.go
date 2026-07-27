@@ -269,31 +269,48 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 }
 
 func runReconnectGate(ctx context.Context, collector *Collector, cfg Config) error {
-	// Compare against the most recently observed position, not one an earlier
-	// gate captured. An IOC that sweeps several price levels reports its fills —
+	// Take the baseline and the search origin from one snapshot, so no event can
+	// slip between them and be counted as neither before nor after.
+	//
+	// The baseline is the most recently observed position, not one an earlier
+	// gate captured: an IOC that sweeps several price levels reports its fills —
 	// and the position growing between them — over successive updates, so the
 	// first long position is often not the final one.
-	before, ok := latestPosition(collector.Events())
+	observed := collector.Events()
+	mark := len(observed)
+	before, ok := latestPosition(observed)
 	if !ok {
 		return fmt.Errorf("smoketest: no position observed before the forced reconnect")
 	}
-	mark := collector.Mark()
+
 	if err := cfg.ForceReconnect(); err != nil {
 		return fmt.Errorf("smoketest: force reconnect: %w", err)
 	}
-	if _, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "disconnected after forced reconnect", isDisconnected); err != nil {
-		return err
-	}
-	if _, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "reconnected", isConnected); err != nil {
-		return err
-	}
-	positionEvent, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "post-reconnect position snapshot", isPosition)
+
+	// Walk the reconnect in order. Each step starts strictly after the previous
+	// match, so a late update from before the drop cannot stand in for the
+	// snapshot the venue sends after it — which is the only thing that proves
+	// local state re-converged.
+	_, disconnectedAt, err := collector.WaitForAt(ctx, mark, cfg.EventTimeout,
+		"disconnected after forced reconnect", isDisconnected)
 	if err != nil {
 		return err
 	}
-	if _, err := collector.WaitFor(ctx, mark, cfg.EventTimeout, "post-reconnect margin snapshot", isMargin); err != nil {
+	_, connectedAt, err := collector.WaitForAt(ctx, disconnectedAt+1, cfg.EventTimeout,
+		"reconnected", isConnected)
+	if err != nil {
 		return err
 	}
+	positionEvent, _, err := collector.WaitForAt(ctx, connectedAt+1, cfg.EventTimeout,
+		"post-reconnect position snapshot", isPosition)
+	if err != nil {
+		return err
+	}
+	if _, _, err := collector.WaitForAt(ctx, connectedAt+1, cfg.EventTimeout,
+		"post-reconnect margin snapshot", isMargin); err != nil {
+		return err
+	}
+
 	after := positionEvent.(godex.PositionEvent).Position
 	if after.Size.Cmp(before.Size) != 0 {
 		return fmt.Errorf("smoketest: post-reconnect position diverged: before=%s after=%s", before.Size, after.Size)

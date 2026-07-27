@@ -13,6 +13,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -35,8 +36,12 @@ func liveContext(t *testing.T) (context.Context, *http.Client, string, string) {
 }
 
 // TestLiveMarketMetadataParses is the check that matters most for order
-// correctness: the venue's own numbers must satisfy the identity the adapter
-// asserts when it converts a rounded price and size into wire units.
+// correctness, and it covers every tradable market rather than a chosen one:
+// the venue's own numbers must satisfy the identity the adapter asserts when it
+// converts a rounded price and size into wire units. If any market's exponents
+// disagreed with its tick and step, orders there would be silently mis-sized —
+// the remainder-zero assertion in the conversion is the safety net, and this is
+// what says the net should never be needed.
 func TestLiveMarketMetadataParses(t *testing.T) {
 	ctx, client, indexer, _ := liveContext(t)
 
@@ -44,50 +49,84 @@ func TestLiveMarketMetadataParses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("fetchMarkets: %v", err)
 	}
-	market, err := response.market("ETH-USD")
-	if err != nil {
-		t.Fatalf("market: %v", err)
-	}
-	meta, err := newMarketMeta(market)
-	if err != nil {
-		t.Fatalf("newMarketMeta: %v", err)
-	}
-	t.Logf("ETH-USD tick=%s step=%s mmf=%s clobPairID=%d",
-		meta.tick, meta.step, meta.maintenanceMarginFraction, meta.clobPairID)
 
-	// One tick and one step must land exactly on the venue's integer grid.
-	subticks, err := meta.toSubticks(meta.tick)
-	if err != nil {
-		t.Fatalf("one tick does not convert cleanly: %v", err)
+	checked, skipped := 0, 0
+	for ticker, entry := range *response.Markets {
+		// Only markets that accept orders matter; Connect refuses the rest.
+		if entry.Status == nil || *entry.Status != marketStatusActive {
+			skipped++
+			continue
+		}
+		market, err := response.market(ticker)
+		if err != nil {
+			t.Errorf("%s: market: %v", ticker, err)
+			continue
+		}
+		meta, err := newMarketMeta(market)
+		if err != nil {
+			t.Errorf("%s: newMarketMeta: %v", ticker, err)
+			continue
+		}
+
+		// One tick and one step must land exactly on the venue's integer grid.
+		subticks, err := meta.toSubticks(meta.tick)
+		if err != nil {
+			t.Errorf("%s: one tick does not convert cleanly: %v", ticker, err)
+			continue
+		}
+		quantums, err := meta.toQuantums(meta.step)
+		if err != nil {
+			t.Errorf("%s: one step does not convert cleanly: %v", ticker, err)
+			continue
+		}
+		if uint64(meta.subticksPerTick) != subticks {
+			t.Errorf("%s: one tick is %d subticks, but subticksPerTick is %d",
+				ticker, subticks, meta.subticksPerTick)
+		}
+		if uint64(meta.stepBaseQuantums) != quantums {
+			t.Errorf("%s: one step is %d quantums, but stepBaseQuantums is %d",
+				ticker, quantums, meta.stepBaseQuantums)
+		}
+		checked++
 	}
-	quantums, err := meta.toQuantums(meta.step)
-	if err != nil {
-		t.Fatalf("one step does not convert cleanly: %v", err)
+
+	if checked == 0 {
+		t.Fatal("no tradable market was checked")
 	}
-	if uint64(meta.subticksPerTick) != subticks {
-		t.Fatalf("one tick is %d subticks, but subticksPerTick is %d", subticks, meta.subticksPerTick)
-	}
-	if uint64(meta.stepBaseQuantums) != quantums {
-		t.Fatalf("one step is %d quantums, but stepBaseQuantums is %d", quantums, meta.stepBaseQuantums)
-	}
+	t.Logf("verified %d tradable markets (%d not tradable)", checked, skipped)
 }
 
-// TestLiveHeightIsAheadOfTheIndexer pins the reason good_til_block is derived
-// from the validator rather than the Indexer.
-func TestLiveHeightIsAheadOfTheIndexer(t *testing.T) {
+// TestLiveIndexerHeightNeverLeadsTheChain pins the reason good_til_block is
+// derived from the validator rather than the Indexer. The Indexer trails the
+// chain, so an order priced off its height would be given a shorter life than
+// intended — or, past the window, none at all.
+//
+// The Indexer is read first so the comparison stays sound: the chain can only
+// have advanced in between, never gone backwards.
+func TestLiveIndexerHeightNeverLeadsTheChain(t *testing.T) {
 	ctx, client, indexer, rpc := liveContext(t)
 
+	response, err := getJSON[indexerHeightResponse](ctx, client, indexer, "/height")
+	if err != nil {
+		t.Fatalf("indexer height: %v", err)
+	}
+	indexerHeight, err := strconv.ParseUint(*response.Height, 10, 32)
+	if err != nil {
+		t.Fatalf("indexer height %q: %v", *response.Height, err)
+	}
 	chainHeight, err := fetchHeight(ctx, client, rpc)
 	if err != nil {
 		t.Fatalf("fetchHeight: %v", err)
 	}
-	indexerHeight, err := getJSON[indexerHeightResponse](ctx, client, indexer, "/height")
-	if err != nil {
-		t.Fatalf("indexer height: %v", err)
-	}
-	t.Logf("chain height %d, indexer height %s", chainHeight, *indexerHeight.Height)
+
+	t.Logf("indexer height %d, chain height %d (lag %d blocks)",
+		indexerHeight, chainHeight, int64(chainHeight)-int64(indexerHeight))
 	if chainHeight == 0 {
 		t.Fatal("chain height must be non-zero")
+	}
+	if uint64(chainHeight) < indexerHeight {
+		t.Fatalf("the Indexer led the chain (%d > %d), which the height choice assumes cannot happen",
+			indexerHeight, chainHeight)
 	}
 }
 
@@ -140,7 +179,7 @@ func TestLiveSubaccountAndHistoryDecode(t *testing.T) {
 	}
 	markets, unattributed := map[string]int{}, 0
 	for _, entry := range *fills.Fills {
-		markets[*entry.Market]++
+		markets[entry.marketTicker()]++
 		if entry.OrderID == nil {
 			unattributed++
 		}
@@ -164,9 +203,16 @@ func TestLiveSubaccountAndHistoryDecode(t *testing.T) {
 }
 
 // TestLiveAccountStreamDecodes subscribes to the public subaccounts channel and
-// runs every frame through the executor's own decoder, so an unexpected message
-// type or payload shape shows up here rather than as an aborted connection
-// during a smoke run.
+// runs every frame it receives through the executor's own decoder, so an
+// unexpected message type or payload shape shows up here rather than as an
+// aborted connection during a smoke run — which is exactly how the streamed
+// fill's market field was found to differ from the REST one.
+//
+// What it can guarantee depends on the account: the subscription snapshot
+// always arrives, so that shape is always covered. Incremental frames only
+// arrive if something happens to the account while the test is watching, so
+// they are decoded when present and reported when not, rather than being
+// claimed as verified. The smoke run covers them directly.
 func TestLiveAccountStreamDecodes(t *testing.T) {
 	ctx, _, _, _ := liveContext(t)
 
@@ -185,37 +231,61 @@ func TestLiveAccountStreamDecodes(t *testing.T) {
 		t.Fatalf("subscribe: %v", err)
 	}
 
-	// The venue answers with a connected frame and then the snapshot.
-	deadline := time.Now().Add(30 * time.Second)
+	// Keep reading past the snapshot: an idle account produces nothing more,
+	// but a busy one exercises the incremental shapes for free.
+	deadline := time.Now().Add(liveStreamWindow)
 	_ = conn.SetReadDeadline(deadline)
-	sawSnapshot := false
-	for !sawSnapshot && time.Now().Before(deadline) {
+	seen := map[string]int{}
+	fills, orders := 0, 0
+	for time.Now().Before(deadline) {
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
-			t.Fatalf("read: %v", err)
+			break // the read deadline closing the window, not a failure
 		}
 		message, err := decodeSubaccountWsMessage(raw)
 		if err != nil {
 			t.Fatalf("the adapter cannot decode a live frame: %v\nframe: %s", err, raw)
 		}
-		t.Logf("frame type=%q channel=%q", message.Type, message.Channel)
-		if message.Type != wsTypeSubscribed {
+		seen[message.Type]++
+		if message.Contents == nil {
 			continue
 		}
-		sawSnapshot = true
-		if message.Contents.Subaccount == nil {
-			t.Fatal("the subscription snapshot carried no subaccount state")
+		for i := range message.Contents.Fills {
+			fills++
+			// Whichever field the stream uses, the market must resolve, or the
+			// executor cannot tell its own executions from another market's.
+			if message.Contents.Fills[i].marketTicker() == "" {
+				t.Fatalf("a streamed fill named no market:\n%s", raw)
+			}
 		}
-		if _, err := normalizeSnapshot(message.Contents.Subaccount,
-			normalizeContext{symbol: "ETH-PERP", ticker: "ETH-USD", receivedAt: time.Now()}); err != nil {
-			t.Fatalf("normalizeSnapshot on live data: %v", err)
+		orders += len(message.Contents.Orders)
+
+		if message.Type == wsTypeSubscribed {
+			if message.Contents.Subaccount == nil {
+				t.Fatal("the subscription snapshot carried no subaccount state")
+			}
+			if _, err := normalizeSnapshot(message.Contents.Subaccount,
+				normalizeContext{symbol: "ETH-PERP", ticker: "ETH-USD", receivedAt: time.Now()}); err != nil {
+				t.Fatalf("normalizeSnapshot on live data: %v", err)
+			}
+			t.Logf("snapshot equity=%s positions=%d orders=%d",
+				*message.Contents.Subaccount.Equity,
+				len(message.Contents.Subaccount.OpenPerpetualPositions),
+				len(message.Contents.Orders))
 		}
-		t.Logf("snapshot equity=%s positions=%d orders=%d",
-			*message.Contents.Subaccount.Equity,
-			len(message.Contents.Subaccount.OpenPerpetualPositions),
-			len(message.Contents.Orders))
 	}
-	if !sawSnapshot {
+
+	if seen[wsTypeSubscribed] == 0 {
 		t.Fatal("no subscription snapshot arrived")
 	}
+	t.Logf("frames by type: %v (fills=%d, order updates=%d)", seen, fills, orders)
+	if seen[wsTypeChannelData] == 0 {
+		t.Logf("note: the account was idle, so no incremental frame was exercised; " +
+			"the smoke run covers those")
+	}
 }
+
+// liveStreamWindow is how long the stream check watches for incremental frames
+// after the snapshot. Long enough to catch activity on a busy account, short
+// enough not to stall an opt-in check on an idle one.
+const liveStreamWindow = 10 * time.Second
