@@ -1322,6 +1322,57 @@ func TestUnknownStreamMessageAbortsIntoReconnect(t *testing.T) {
 	}
 }
 
+// TestPartiallyFilledIOCIsStillAttributedAfterItsRejection pins what a
+// rejection does and does not mean.
+//
+// An IOC that fills part of its size has the remainder cancelled, and the venue
+// reports that cancellation in an earlier message than the execution — the
+// order observed on testnet. So the rejection closes the order before its own
+// fill arrives, and the fill must still reach the caller under the order id
+// they were given. That works because the venue-id mapping deliberately
+// outlives the order; removing it with the order would silently reattribute
+// this fill to a venue id the caller has never seen.
+func TestPartiallyFilledIOCIsStillAttributedAfterItsRejection(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, fake, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentIOC))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	params := fake.lastPlace(t)
+	venueOrderID := "venue-order-" + strconv.FormatUint(uint64(params.clientID), 10)
+
+	mark := collector.Mark()
+	venue.push(orderFrame(t, params.clientID, venueOrderID, orderStatusCanceled, map[string]any{
+		"removalReason": "ORDER_REMOVAL_REASON_IMMEDIATE_OR_CANCEL_WOULD_REST_ON_BOOK",
+	}))
+	venue.push(fillFrame(t, "fill-ioc-remainder", venueOrderID, "3010.2", "0.002"))
+
+	rejection, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"remainder cancelled", isRejectionFor(ack.OrderID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := rejection.(godex.OrderRejectedEvent).Reason; !strings.Contains(reason, "IMMEDIATE_OR_CANCEL") {
+		t.Fatalf("reason = %q, want the venue's own removal reason", reason)
+	}
+
+	fill, err := collector.WaitFor(context.Background(), mark, testEventTimeout, "fill", isFillEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filled := fill.(godex.FillEvent)
+	if filled.OrderID != ack.OrderID {
+		t.Fatalf("fill attributed to %q, want the caller's order id %q — a rejection must not "+
+			"orphan a fill that follows it", filled.OrderID, ack.OrderID)
+	}
+	if filled.Size.String() != "0.002" {
+		t.Fatalf("fill size = %s, want the partially filled 0.002", filled.Size)
+	}
+}
+
 // TestFilledOrdersAreRetiredWithoutARejection: a fully filled order is terminal
 // too. It must stop being tracked — otherwise every IOC leaks an entry for the
 // life of the process — but reporting it as rejected would contradict the fills

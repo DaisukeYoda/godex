@@ -60,8 +60,22 @@ type MarginEvent struct {
 	Time       time.Time
 }
 
-// OrderRejectedEvent reports a venue rejection — e.g. a post-only order that
-// would cross. A normal-path event, not an error.
+// OrderRejectedEvent reports that an order is finished without having filled
+// in full — a post-only order that would cross, an IOC remainder the venue
+// cancelled, a short-term order that reached its expiry block. A normal-path
+// event, not an error.
+//
+// It means no further fills are coming for this order. It does not mean the
+// order did nothing: an IOC that filled part of its size and had the rest
+// cancelled produces both a FillEvent and this. Consumers must treat it as
+// closing the order, not as voiding it.
+//
+// It can also arrive before a fill it accounts for, when the venue reports the
+// removal in an earlier message than the execution. Adapters emit fills first
+// within a single venue message, but they do not reorder across messages —
+// buffering the account stream to tidy this would cost latency on the one
+// signal that must not have any. Attribute fills by OrderID rather than
+// assuming a rejection is the last word on an order.
 type OrderRejectedEvent struct {
 	OrderID OrderID
 	Reason  string
