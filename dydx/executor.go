@@ -870,6 +870,12 @@ func (e *Executor) handleChannelData(contents *subaccountContents) error {
 
 	// Fills first: a frame can carry both an execution and the terminal order
 	// update it caused, and the execution is the reason for the ending.
+	//
+	// Across frames the venue's order stands. It reports an IOC remainder's
+	// cancellation before the execution that remainder is left over from, so a
+	// rejection can precede its own fill; godex.OrderRejectedEvent documents
+	// that, and the fill stays attributable because the venue-id mapping
+	// outlives the order.
 	for i := range contents.Fills {
 		if err := e.emitFill(&contents.Fills[i]); err != nil {
 			return err
