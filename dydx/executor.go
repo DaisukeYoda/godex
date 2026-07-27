@@ -978,7 +978,7 @@ func (e *Executor) emitFill(entry *fill) error {
 	// field, so emitting a foreign fill would present it under this executor's
 	// symbol — indistinguishable from one of its own executions. It is recorded
 	// as seen so later backfills stop re-examining it.
-	if *entry.Market != e.cfg.ticker {
+	if entry.marketTicker() != e.cfg.ticker {
 		e.rememberFillLocked(*entry.ID)
 		return nil
 	}

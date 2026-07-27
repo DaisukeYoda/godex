@@ -210,15 +210,15 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 	if _, err := collector.WaitFor(ctx, iocMark, cfg.EventTimeout, "ioc fill", isFillFor(iocAck.OrderID)); err != nil {
 		return err
 	}
-	longEvent, err := collector.WaitFor(ctx, iocMark, cfg.EventTimeout, "long position reflected", isPositionWithSign(1))
-	if err != nil {
+	if _, err := collector.WaitFor(ctx, iocMark, cfg.EventTimeout,
+		"long position reflected", isPositionWithSign(1)); err != nil {
 		return err
 	}
 	pass("ioc fill + long position")
 
 	// Gate 5 (optional): reconnect while holding the position.
 	if cfg.ForceReconnect != nil {
-		if err := runReconnectGate(ctx, collector, cfg, longEvent.(godex.PositionEvent).Position); err != nil {
+		if err := runReconnectGate(ctx, collector, cfg); err != nil {
 			return err
 		}
 		pass("reconnect: alternation + snapshot convergence")
@@ -268,7 +268,15 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 	return nil
 }
 
-func runReconnectGate(ctx context.Context, collector *Collector, cfg Config, before godex.Position) error {
+func runReconnectGate(ctx context.Context, collector *Collector, cfg Config) error {
+	// Compare against the most recently observed position, not one an earlier
+	// gate captured. An IOC that sweeps several price levels reports its fills —
+	// and the position growing between them — over successive updates, so the
+	// first long position is often not the final one.
+	before, ok := latestPosition(collector.Events())
+	if !ok {
+		return fmt.Errorf("smoketest: no position observed before the forced reconnect")
+	}
 	mark := collector.Mark()
 	if err := cfg.ForceReconnect(); err != nil {
 		return fmt.Errorf("smoketest: force reconnect: %w", err)
@@ -339,6 +347,16 @@ func runNaturalFillGate(ctx context.Context, exec godex.VenueExecutor, collector
 }
 
 // scalePrice multiplies price by a factor string, keeping price's scale.
+// latestPosition returns the most recently observed position.
+func latestPosition(events []godex.AccountEvent) (godex.Position, bool) {
+	for i := len(events) - 1; i >= 0; i-- {
+		if position, ok := events[i].(godex.PositionEvent); ok {
+			return position.Position, true
+		}
+	}
+	return godex.Position{}, false
+}
+
 func scalePrice(price decimal.Decimal, factor string) decimal.Decimal {
 	return price.MulToScale(decimal.MustFromString(factor, factorScale), price.Scale())
 }

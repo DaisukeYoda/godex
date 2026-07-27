@@ -11,8 +11,8 @@ exactly what a post-only maker / IOC taker strategy needs. See
 `docs/pre-implementation.md` for the design boundary and safety rules.
 
 **Status: pre-release.** The Lighter and dYdX adapters are implemented with
-full unit suites; final adoption sign-off for each requires the testnet smoke
-run below.
+full unit suites. The dYdX adapter has passed the full testnet adoption-gate
+run (2026-07-27); Lighter's sign-off is still pending.
 
 ## Install
 

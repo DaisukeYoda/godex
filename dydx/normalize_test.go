@@ -262,6 +262,11 @@ func TestToFillUsesVenueTimestamp(t *testing.T) {
 	response := decodeFixture[fillsResponse](t, "fills.json")
 	entry := &(*response.Fills)[0]
 
+	// The REST history names the market "market"; both spellings resolve.
+	if entry.marketTicker() != "ETH-USD" {
+		t.Fatalf("marketTicker = %q, want ETH-USD", entry.marketTicker())
+	}
+
 	event, err := toFill(entry, "42")
 	if err != nil {
 		t.Fatalf("toFill: %v", err)
