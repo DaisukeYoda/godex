@@ -59,6 +59,9 @@ type fakeVenue struct {
 	marketsJSON     []byte
 	marketsGate     chan struct{} // when set, holds the markets response back
 	subaccountJSON  []byte
+	subaccountQueue []string      // served one per read, ahead of subaccountJSON
+	subaccountGate  chan struct{} // when set, holds the subaccount response back
+	subaccountReads int
 	fillsJSON       []byte
 	fillHistory     []map[string]any // newest first; enables real pagination
 	fillPageQueries []string
@@ -95,10 +98,21 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		}
 		_, _ = w.Write(body)
 	})
-	mux.HandleFunc("/v4/addresses/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v4/addresses/", func(w http.ResponseWriter, r *http.Request) {
 		venue.mu.Lock()
-		body := venue.subaccountJSON
+		venue.subaccountReads++
+		body, gate := venue.subaccountJSON, venue.subaccountGate
+		if len(venue.subaccountQueue) > 0 {
+			body, venue.subaccountQueue = []byte(venue.subaccountQueue[0]), venue.subaccountQueue[1:]
+		}
 		venue.mu.Unlock()
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_, _ = w.Write(body)
 	})
 	mux.HandleFunc("/v4/fills", func(w http.ResponseWriter, r *http.Request) {
@@ -354,6 +368,32 @@ func (v *fakeVenue) setSubaccount(body string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.subaccountJSON = []byte(body)
+}
+
+// queueSubaccount serves these snapshots to the next reads, one each, before
+// falling back to the standing one — so a test can hand back a state that
+// settles partway through a sequence of reads.
+func (v *fakeVenue) queueSubaccount(bodies ...string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.subaccountQueue = append(v.subaccountQueue, bodies...)
+}
+
+func (v *fakeVenue) subaccountReadCount() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.subaccountReads
+}
+
+// blockSubaccount holds the account snapshot response until the returned
+// function is called, so a test can run the stream while a re-read is in
+// flight.
+func (v *fakeVenue) blockSubaccount() func() {
+	gate := make(chan struct{})
+	v.mu.Lock()
+	v.subaccountGate = gate
+	v.mu.Unlock()
+	return sync.OnceFunc(func() { close(gate) })
 }
 
 func (v *fakeVenue) setFills(body string) {
@@ -1582,15 +1622,19 @@ func TestZeroEntryPriceIsRereadNotEmitted(t *testing.T) {
 	}
 }
 
-// TestZeroEntryPriceThatIsRealIsStillPublished: refusing the transient must not
-// become a way to suppress a position outright. If the zero survives into the
-// REST snapshot, that is what the venue holds, and the re-read publishes it.
-func TestZeroEntryPriceThatIsRealIsStillPublished(t *testing.T) {
+// TestZeroEntryPriceSurvivingIntoTheSnapshotIsRereadAgain: REST is served from
+// the same Indexer state as the stream, so the re-read can land before the
+// venue has priced the position. Taking that first answer would publish the
+// exact number the re-read exists to avoid, so the snapshot is read again until
+// it settles.
+func TestZeroEntryPriceSurvivingIntoTheSnapshotIsRereadAgain(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, collector := newTestExecutor(t, venue)
 	mustConnect(t, executor)
 
-	venue.setSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
+	// The first re-read still carries the transient; the second has settled.
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "1954.9", "-0.028215654"))
+	venue.queueSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
 
 	mark := collector.Mark()
 	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
@@ -1601,8 +1645,72 @@ func TestZeroEntryPriceThatIsRealIsStillPublished(t *testing.T) {
 		t.Fatal(err)
 	}
 	position := event.(godex.PositionEvent).Position
+	if position.EntryPrice.String() != "1954.9" {
+		t.Fatalf("entry price = %s, want the settled 1954.9", position.EntryPrice)
+	}
+	if position.UnrealizedPnL.String() != "-0.028215654" {
+		t.Fatalf("unrealized pnl = %s, want the settled -0.028215654", position.UnrealizedPnL)
+	}
+}
+
+// TestZeroEntryPriceThatIsRealIsStillPublished: refusing the transient must not
+// become a way to suppress a position outright. A zero that repeats across
+// reads is the venue's answer rather than a moment in flight, so it is
+// published — after a bounded number of reads, not indefinitely many.
+func TestZeroEntryPriceThatIsRealIsStillPublished(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
+
+	mark := collector.Mark()
+	before := venue.subaccountReadCount()
+	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
+
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"position", isPositionEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := event.(godex.PositionEvent).Position
 	if position.Size.String() != "0.002" || !position.EntryPrice.IsZero() {
 		t.Fatalf("position = size %s at %s, want 0.002 at 0", position.Size, position.EntryPrice)
+	}
+	if reads := venue.subaccountReadCount() - before; reads != positionPriceReads {
+		t.Fatalf("%d snapshot reads, want %d: the confirmation must be bounded",
+			reads, positionPriceReads)
+	}
+}
+
+// TestSnapshotRereadIsSequencedBeforeLaterStreamUpdates: the re-read runs on its
+// own goroutine, but its observation sequence has to be reserved before the
+// stream reader moves on. Reserving it inside the goroutine leaves the ordering
+// to the scheduler, and losing that race lets a REST response describing an
+// older state outrank — and overwrite — the corrected update the reader handled
+// in the meantime.
+func TestSnapshotRereadIsSequencedBeforeLaterStreamUpdates(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	// Hold the response so the re-read cannot finish and reserve late by luck.
+	release := venue.blockSubaccount()
+	defer release()
+
+	executor.stateMu.Lock()
+	before := executor.observationSeq
+	executor.stateMu.Unlock()
+
+	executor.requestSnapshotRefresh()
+
+	executor.stateMu.Lock()
+	after := executor.observationSeq
+	executor.stateMu.Unlock()
+	if after <= before {
+		t.Fatalf("observation sequence %d unchanged from %d: the re-read must be "+
+			"sequenced before requestSnapshotRefresh returns, so an update handled "+
+			"afterwards outranks it", after, before)
 	}
 }
 

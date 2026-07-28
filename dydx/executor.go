@@ -1166,9 +1166,19 @@ func (e *Executor) requestSnapshotRefresh() {
 	if e.beginOp() != nil {
 		return
 	}
+	// Reserved here rather than inside the goroutine, on the stream reader's
+	// own goroutine: every update the reader handles after this call must
+	// outrank the re-read. Reserving in the goroutine leaves that to the
+	// scheduler, and losing the race lets a REST response describing an older
+	// state overwrite a newer stream update — the state the re-read was
+	// prompted by, in the case that matters.
+	e.stateMu.Lock()
+	sequence := e.nextObservationSeqLocked()
+	e.stateMu.Unlock()
+
 	go func() {
 		defer e.endOp()
-		if err := e.refreshSnapshot(e.lifecycleCtx); err != nil && e.lifecycleCtx.Err() == nil {
+		if err := e.refreshSnapshotAt(e.lifecycleCtx, sequence); err != nil && e.lifecycleCtx.Err() == nil {
 			e.logger.Error("dydx account snapshot refresh failed", "error", err)
 		}
 	}()
@@ -1181,11 +1191,14 @@ func (e *Executor) refreshSnapshot(ctx context.Context) error {
 	e.stateMu.Lock()
 	sequence := e.nextObservationSeqLocked()
 	e.stateMu.Unlock()
+	return e.refreshSnapshotAt(ctx, sequence)
+}
 
-	requestCtx, cancel := context.WithTimeout(ctx, e.cfg.txRequestTimeout)
-	defer cancel()
-	response, err := fetchSubaccount(requestCtx, e.cfg.httpClient, e.cfg.indexerRESTBaseURL,
-		e.cfg.credentials.Address, e.cfg.credentials.SubaccountNumber)
+// refreshSnapshotAt is refreshSnapshot under an already-reserved observation
+// sequence, for callers that must order the re-read against stream updates they
+// have not handled yet.
+func (e *Executor) refreshSnapshotAt(ctx context.Context, sequence int64) error {
+	response, err := e.readSettledSubaccount(ctx)
 	if err != nil {
 		return err
 	}
@@ -1197,6 +1210,44 @@ func (e *Executor) refreshSnapshot(ctx context.Context) error {
 	applied := e.applyStateEvents(events, sequence)
 	e.clearAccountInvalid(sequence, applied)
 	return nil
+}
+
+// readSettledSubaccount reads the account snapshot, re-reading while it still
+// carries a position with size at a zero entry price. The Indexer serves REST
+// from the same state the stream publishes, so a re-read prompted by that
+// transient can arrive before the venue has priced the position — believing the
+// first answer would put the very number the re-read exists to avoid back into
+// the stream.
+//
+// Bounded, and the last read is used either way. A zero that repeats across
+// reads this far apart is the venue's answer rather than a moment in flight,
+// and refusing it indefinitely would strand a position that really is unpriced.
+// If the stream's own correction lands while this is confirming, it carries a
+// later observation sequence and wins.
+func (e *Executor) readSettledSubaccount(ctx context.Context) (*subaccountResponse, error) {
+	for attempt := 1; ; attempt++ {
+		requestCtx, cancel := context.WithTimeout(ctx, e.cfg.txRequestTimeout)
+		response, err := fetchSubaccount(requestCtx, e.cfg.httpClient, e.cfg.indexerRESTBaseURL,
+			e.cfg.credentials.Address, e.cfg.credentials.SubaccountNumber)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+		entry := findPosition(response.Subaccount.OpenPerpetualPositions, e.cfg.ticker)
+		if entry == nil || !entry.entryPriceUnsettled() {
+			return response, nil
+		}
+		if attempt == positionPriceReads {
+			e.logger.Warn("dydx reports a position with size at a zero entry price; publishing it",
+				"market", e.cfg.ticker, "size", *entry.Size, "reads", attempt)
+			return response, nil
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(positionPriceRereadDelay):
+		}
+	}
 }
 
 // applyStateEvents emits a batch, dropping stale position and margin
