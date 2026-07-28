@@ -348,6 +348,14 @@ func (v *fakeVenue) fillPageCount() int {
 	return len(v.fillPageQueries)
 }
 
+// setSubaccount replaces the account snapshot the REST endpoint serves, so a
+// test can control what an out-of-band re-read finds.
+func (v *fakeVenue) setSubaccount(body string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.subaccountJSON = []byte(body)
+}
+
 func (v *fakeVenue) setFills(body string) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
@@ -1491,6 +1499,110 @@ func TestFillInAnotherMarketIsNotReportedAsOurs(t *testing.T) {
 		if fill, ok := event.(godex.FillEvent); ok && fill.Size.String() == "0.010" {
 			t.Fatalf("a BTC-USD fill was reported on the ETH-PERP stream: %+v", fill)
 		}
+	}
+}
+
+// positionFrame builds one channel_data position update for this executor's
+// market.
+func positionFrame(t *testing.T, size, entryPrice, unrealizedPnl string) []byte {
+	t.Helper()
+	frame, err := json.Marshal(map[string]any{
+		"type":    wsTypeChannelData,
+		"channel": subaccountsChannel,
+		"contents": map[string]any{
+			"perpetualPositions": []any{map[string]any{
+				"market":        testTicker,
+				"status":        "OPEN",
+				"side":          "LONG",
+				"size":          size,
+				"entryPrice":    entryPrice,
+				"unrealizedPnl": unrealizedPnl,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode position frame: %v", err)
+	}
+	return frame
+}
+
+// subaccountWithPosition rewrites the REST fixture's open position, so a test
+// can say what a snapshot re-read should find.
+func subaccountWithPosition(t *testing.T, size, entryPrice, unrealizedPnl string) string {
+	t.Helper()
+	var snapshot map[string]any
+	if err := json.Unmarshal(loadFixture(t, "subaccount_rest.json"), &snapshot); err != nil {
+		t.Fatalf("subaccount fixture decode: %v", err)
+	}
+	positions := snapshot["subaccount"].(map[string]any)["openPerpetualPositions"].(map[string]any)
+	position := positions[testTicker].(map[string]any)
+	position["size"] = size
+	position["entryPrice"] = entryPrice
+	position["unrealizedPnl"] = unrealizedPnl
+	body, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("encode subaccount: %v", err)
+	}
+	return string(body)
+}
+
+// TestZeroEntryPriceIsRereadNotEmitted: in the moment after a fill the stream
+// reports the new size with an entry price of zero, and an unrealized PnL
+// computed against that zero, before correcting both in the next update
+// (testnet, 2026-07-27). A consumer measuring liquidation distance off entry
+// price would read that as a position it does not hold, so the adapter re-reads
+// the snapshot instead of publishing it.
+func TestZeroEntryPriceIsRereadNotEmitted(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	// What the re-read finds: the position the venue settles on.
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "1954.9", "-0.028215654"))
+
+	mark := collector.Mark()
+	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
+
+	// The first position after the transient is the one that matters: had the
+	// transient been emitted, it would be this event.
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"position", isPositionEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := event.(godex.PositionEvent).Position
+	if position.EntryPrice.String() != "1954.9" {
+		t.Fatalf("entry price = %s, want the re-read 1954.9", position.EntryPrice)
+	}
+	if position.UnrealizedPnL.String() != "-0.028215654" {
+		t.Fatalf("unrealized pnl = %s, want the re-read -0.028215654", position.UnrealizedPnL)
+	}
+	if position.Size.String() != "0.002" {
+		t.Fatalf("position size = %s, want 0.002", position.Size)
+	}
+}
+
+// TestZeroEntryPriceThatIsRealIsStillPublished: refusing the transient must not
+// become a way to suppress a position outright. If the zero survives into the
+// REST snapshot, that is what the venue holds, and the re-read publishes it.
+func TestZeroEntryPriceThatIsRealIsStillPublished(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
+
+	mark := collector.Mark()
+	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
+
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"position", isPositionEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := event.(godex.PositionEvent).Position
+	if position.Size.String() != "0.002" || !position.EntryPrice.IsZero() {
+		t.Fatalf("position = size %s at %s, want 0.002 at 0", position.Size, position.EntryPrice)
 	}
 }
 

@@ -9,6 +9,22 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
+## Unreleased
+
+### Fixed
+
+- **dYdX no longer publishes a position priced at zero.** In the moment after a
+  fill the account stream reports the new size with an entry price of zero, and
+  an unrealized PnL computed against that zero, correcting both in the next
+  update ([#4](https://github.com/DaisukeYoda/godex/issues/4)). Size at no price
+  is not a state the venue can be in, so the adapter now re-reads the REST
+  snapshot instead of emitting it, as it already did for updates that omit the
+  priced fields outright. Consumers sizing off position size alone were
+  unaffected; one measuring liquidation distance or PnL from entry price could
+  briefly read a position the account did not hold. A zero that survives into
+  the snapshot is published — the re-read is what the adapter believes, so a
+  legitimately unpriced position cannot be suppressed by this.
+
 ## v0.2.0 — dYdX v4 adapter
 
 Adds `dydx`, alongside the existing `lighter`. Both adapters have now passed

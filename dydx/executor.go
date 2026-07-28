@@ -862,9 +862,9 @@ func (e *Executor) handleSubscribed(contents *subaccountContents) error {
 }
 
 // handleChannelData applies an incremental update. Order removals and fills are
-// always applied; position updates are applied only when the venue included the
-// priced fields, and otherwise trigger a snapshot re-read rather than a
-// half-populated position.
+// always applied; position updates are applied only when the venue priced them
+// plausibly, and otherwise trigger a snapshot re-read rather than a position
+// godex would not stand behind.
 func (e *Executor) handleChannelData(contents *subaccountContents) error {
 	e.indexOrders(contents.Orders)
 
@@ -887,7 +887,7 @@ func (e *Executor) handleChannelData(contents *subaccountContents) error {
 	if entry == nil {
 		return nil
 	}
-	if !entry.complete() {
+	if !entry.complete() || entry.entryPriceUnsettled() {
 		e.requestSnapshotRefresh()
 		return nil
 	}
