@@ -4,7 +4,12 @@ go 1.24
 
 require github.com/gorilla/websocket v1.5.3
 
-require google.golang.org/protobuf v1.36.5
+require (
+	github.com/vmihailenco/msgpack/v5 v5.4.1
+	google.golang.org/protobuf v1.36.5
+)
+
+require github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 
 require (
 	github.com/bits-and-blooms/bitset v1.17.0 // indirect

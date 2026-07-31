@@ -1,0 +1,22 @@
+{
+  "universe": [
+    {"name": "BTC", "szDecimals": 5, "maxLeverage": 40, "marginTableId": 54},
+    {"name": "OLD", "szDecimals": 1, "maxLeverage": 3, "marginTableId": 3, "isDelisted": true},
+    {"name": "ISO", "szDecimals": 2, "maxLeverage": 5, "marginTableId": 5, "onlyIsolated": true},
+    {"name": "SOL", "szDecimals": 2, "maxLeverage": 20, "marginTableId": 20},
+    {"name": "ETH", "szDecimals": 4, "maxLeverage": 25, "marginTableId": 53},
+    {"name": "ODD", "szDecimals": 2, "maxLeverage": 10, "marginTableId": 99}
+  ],
+  "marginTables": [
+    [50, {"description": "", "marginTiers": [{"lowerBound": "0.0", "maxLeverage": 50}]}],
+    [53, {"description": "", "marginTiers": [
+      {"lowerBound": "0.0", "maxLeverage": 25},
+      {"lowerBound": "20000.0", "maxLeverage": 10},
+      {"lowerBound": "50000.0", "maxLeverage": 5}
+    ]}],
+    [54, {"description": "", "marginTiers": [
+      {"lowerBound": "0.0", "maxLeverage": 40},
+      {"lowerBound": "10000.0", "maxLeverage": 25}
+    ]}]
+  ]
+}

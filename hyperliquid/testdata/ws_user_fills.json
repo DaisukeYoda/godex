@@ -1,0 +1,26 @@
+{
+  "channel": "userFills",
+  "data": {
+    "isSnapshot": false,
+    "user": "0x1719884eb866cb12b2287399b15f7db5e7d775ea",
+    "fills": [
+      {
+        "coin": "ETH",
+        "px": "2986.3",
+        "sz": "0.5",
+        "side": "B",
+        "time": 1753660000000,
+        "startPosition": "0.0",
+        "dir": "Open Long",
+        "closedPnl": "0.0",
+        "hash": "0xdeadbeef",
+        "oid": 77738308,
+        "crossed": false,
+        "fee": "0.0447",
+        "tid": 991001,
+        "feeToken": "USDC",
+        "cloid": "0x0000000000000000000000000000abcd"
+      }
+    ]
+  }
+}

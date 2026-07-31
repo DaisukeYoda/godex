@@ -1,0 +1,26 @@
+{
+  "assetPositions": [
+    {
+      "position": {
+        "coin": "ETH",
+        "szi": "0.5000",
+        "entryPx": "2986.3",
+        "positionValue": "1493.15",
+        "unrealizedPnl": "-0.0134",
+        "marginUsed": "29.863",
+        "leverage": {"type": "cross", "value": 50},
+        "liquidationPx": "2866.26936529"
+      },
+      "type": "oneWay"
+    }
+  ],
+  "marginSummary": {
+    "accountValue": "13109.482328",
+    "totalNtlPos": "1493.15",
+    "totalRawUsd": "11616.332328",
+    "totalMarginUsed": "4.967826"
+  },
+  "crossMarginSummary": {"accountValue": "13109.482328", "totalMarginUsed": "4.967826"},
+  "withdrawable": "13104.514502",
+  "crossMaintenanceMarginUsed": "14.9315"
+}

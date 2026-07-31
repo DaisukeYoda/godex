@@ -12,10 +12,17 @@
 //	  go run ./cmd/godex-smoke -venue dydx -network testnet \
 //	  -ticker ETH-USD -symbol ETH-PERP -size 0.010 [-wait-fill] [-reconnect-check]
 //
+//	HYPERLIQUID_ACCOUNT_ADDRESS=0x... HYPERLIQUID_API_PRIVATE_KEY=0x... \
+//	[HYPERLIQUID_VAULT_ADDRESS=0x...] \
+//	  go run ./cmd/godex-smoke -venue hyperliquid -network testnet \
+//	  -coin ETH -symbol ETH-PERP -size 0.010 [-wait-fill] [-reconnect-check]
+//
 // Markets are named per venue: Lighter takes a numeric -market-id, dYdX a
-// -ticker. Credentials must be venue-scoped trading keys — never L1 master keys
-// — and should be testnet-only. -record streams the raw account WS frames to a
-// JSONL file (fixture refresh, auth-expiry observation); it is Lighter-only.
+// -ticker, Hyperliquid a -coin. Credentials must be venue-scoped trading keys —
+// never L1 master keys — and should be testnet-only; on Hyperliquid that means
+// an API (agent) wallet, which can trade but cannot withdraw. -record streams
+// the raw account WS frames to a JSONL file (fixture refresh, auth-expiry
+// observation); it is Lighter-only.
 package main
 
 import (
@@ -36,6 +43,7 @@ import (
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
 	"github.com/DaisukeYoda/godex/dydx"
+	"github.com/DaisukeYoda/godex/hyperliquid"
 	"github.com/DaisukeYoda/godex/lighter"
 	"github.com/DaisukeYoda/godex/smoketest"
 	lighterclient "github.com/elliottech/lighter-go/client"
@@ -44,8 +52,9 @@ import (
 )
 
 const (
-	venueLighter = "lighter"
-	venueDydx    = "dydx"
+	venueLighter     = "lighter"
+	venueDydx        = "dydx"
+	venueHyperliquid = "hyperliquid"
 
 	// Body-level success code of the Lighter REST API.
 	lighterRESTSuccessCode = 200
@@ -62,6 +71,7 @@ type options struct {
 	network        string
 	marketID       int64
 	ticker         string
+	coin           string
 	symbol         string
 	size           decimal.Decimal
 	waitFill       bool
@@ -89,17 +99,21 @@ func run() error {
 		return runLighter(ctx, opts)
 	case venueDydx:
 		return runDydx(ctx, opts)
+	case venueHyperliquid:
+		return runHyperliquid(ctx, opts)
 	default:
-		return fmt.Errorf("unknown venue %q (supported: %s, %s)", opts.venue, venueLighter, venueDydx)
+		return fmt.Errorf("unknown venue %q (supported: %s, %s, %s)",
+			opts.venue, venueLighter, venueDydx, venueHyperliquid)
 	}
 }
 
 func parseFlags(args []string) (options, error) {
 	flags := flag.NewFlagSet("godex-smoke", flag.ContinueOnError)
-	venue := flags.String("venue", "", "venue to test (required; supported: lighter, dydx)")
+	venue := flags.String("venue", "", "venue to test (required; supported: lighter, dydx, hyperliquid)")
 	network := flags.String("network", "", "testnet or mainnet (required; use testnet)")
 	marketID := flags.Int64("market-id", -1, "Lighter market index (required for -venue lighter; e.g. SOL testnet = 2)")
 	ticker := flags.String("ticker", "", "dYdX market ticker (required for -venue dydx; e.g. ETH-USD)")
+	coin := flags.String("coin", "", "Hyperliquid perp name (required for -venue hyperliquid; e.g. ETH)")
 	symbol := flags.String("symbol", "", "normalized symbol label (required; e.g. SOL-PERP)")
 	size := flags.String("size", "", "order size as a decimal string (required; e.g. 0.200)")
 	waitFill := flags.Bool("wait-fill", false, "also wait for a natural near-touch maker fill")
@@ -122,6 +136,10 @@ func parseFlags(args []string) (options, error) {
 		if *ticker == "" {
 			return options{}, fmt.Errorf("-ticker is required for -venue %s", venueDydx)
 		}
+	case venueHyperliquid:
+		if *coin == "" {
+			return options{}, fmt.Errorf("-coin is required for -venue %s", venueHyperliquid)
+		}
 	}
 	sizeDecimal, err := decimal.FromDecimalString(*size)
 	if err != nil {
@@ -132,6 +150,7 @@ func parseFlags(args []string) (options, error) {
 		network:        *network,
 		marketID:       *marketID,
 		ticker:         *ticker,
+		coin:           *coin,
 		symbol:         *symbol,
 		size:           sizeDecimal,
 		waitFill:       *waitFill,
@@ -537,4 +556,118 @@ func extremePrice(levels []struct {
 		return decimal.Decimal{}, fmt.Errorf("empty order book side")
 	}
 	return best, nil
+}
+
+func loadHyperliquidCredentials() (hyperliquid.Credentials, error) {
+	accountAddress, err := requireEnv("HYPERLIQUID_ACCOUNT_ADDRESS")
+	if err != nil {
+		return hyperliquid.Credentials{}, err
+	}
+	apiPrivateKey, err := requireEnv("HYPERLIQUID_API_PRIVATE_KEY")
+	if err != nil {
+		return hyperliquid.Credentials{}, err
+	}
+	// Vaults and subaccounts are optional; without one, orders and account
+	// state belong to the account address itself.
+	return hyperliquid.Credentials{
+		AccountAddress: accountAddress,
+		APIPrivateKey:  apiPrivateKey,
+		VaultAddress:   os.Getenv("HYPERLIQUID_VAULT_ADDRESS"),
+	}, nil
+}
+
+func runHyperliquid(ctx context.Context, opts options) error {
+	credentials, err := loadHyperliquidCredentials()
+	if err != nil {
+		return err
+	}
+	network := hyperliquid.Network(opts.network)
+	restBaseURL, err := network.RESTBaseURL()
+	if err != nil {
+		return err
+	}
+
+	executor, err := hyperliquid.New(hyperliquid.Config{
+		Credentials: credentials,
+		Symbol:      godex.Symbol(opts.symbol),
+		Coin:        opts.coin,
+		Network:     network,
+	})
+	if err != nil {
+		return err
+	}
+	if opts.recordPath != "" {
+		logf("note: -record is Lighter-only and is ignored for %s", venueHyperliquid)
+	}
+
+	cfg := smoketest.Config{
+		Symbol: godex.Symbol(opts.symbol),
+		Size:   opts.size,
+		FetchTOB: func(ctx context.Context) (smoketest.TOB, error) {
+			return fetchHyperliquidTOB(ctx, restBaseURL, opts.coin)
+		},
+		Logf:     logf,
+		WaitFill: opts.waitFill,
+	}
+	if opts.reconnectCheck {
+		cfg.ForceReconnect = executor.ForceReconnect
+	}
+	if err := smoketest.Run(ctx, executor, cfg); err != nil {
+		return err
+	}
+	logf("all adoption gates passed")
+	return nil
+}
+
+// fetchHyperliquidTOB reads the venue's top of book from the public l2Book
+// endpoint (outside the executor contract, so the harness fetches it
+// directly). The venue returns [bids, asks], each already sorted best first.
+func fetchHyperliquidTOB(ctx context.Context, restBaseURL, coin string) (smoketest.TOB, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, tobRequestTimeout)
+	defer cancel()
+	payload, err := json.Marshal(map[string]string{"type": "l2Book", "coin": coin})
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost,
+		restBaseURL+"/info", strings.NewReader(string(payload)))
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return smoketest.TOB{}, fmt.Errorf("l2Book failed: HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	var book struct {
+		Levels [][]struct {
+			Px *string `json:"px"`
+		} `json:"levels"`
+	}
+	if err := json.Unmarshal(body, &book); err != nil {
+		return smoketest.TOB{}, fmt.Errorf("l2Book returned malformed JSON: %w", err)
+	}
+	if len(book.Levels) != 2 || len(book.Levels[0]) == 0 || len(book.Levels[1]) == 0 {
+		return smoketest.TOB{}, fmt.Errorf("empty order book")
+	}
+	if book.Levels[0][0].Px == nil || book.Levels[1][0].Px == nil {
+		return smoketest.TOB{}, fmt.Errorf("l2Book level is missing a price")
+	}
+	bestBid, err := decimal.FromDecimalString(*book.Levels[0][0].Px)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	bestAsk, err := decimal.FromDecimalString(*book.Levels[1][0].Px)
+	if err != nil {
+		return smoketest.TOB{}, err
+	}
+	return smoketest.TOB{BestBid: bestBid, BestAsk: bestAsk}, nil
 }
