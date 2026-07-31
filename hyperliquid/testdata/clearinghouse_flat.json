@@ -1,0 +1,12 @@
+{
+  "assetPositions": [],
+  "marginSummary": {
+    "accountValue": "1000.000000",
+    "totalNtlPos": "0.0",
+    "totalRawUsd": "1000.000000",
+    "totalMarginUsed": "0.0"
+  },
+  "crossMarginSummary": {"accountValue": "1000.000000", "totalMarginUsed": "0.0"},
+  "withdrawable": "1000.000000",
+  "crossMaintenanceMarginUsed": "0.0"
+}

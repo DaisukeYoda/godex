@@ -1,7 +1,7 @@
 # godex
 
-Go trading integration layer for perpetual DEXes — Lighter (zkLighter) and
-dYdX v4 today, Hyperliquid planned. godex owns authenticated order placement,
+Go trading integration layer for perpetual DEXes — Lighter (zkLighter),
+dYdX v4, and Hyperliquid. godex owns authenticated order placement,
 cancellation, account-state observation, and venue-specific signing behind a
 small, safety-oriented contract. Strategy and risk logic depend only on the
 normalized types and events; venue protocol details never leak out.
@@ -10,8 +10,11 @@ This is **not** a generic exchange SDK. The contract intentionally supports
 exactly what a post-only maker / IOC taker strategy needs. See
 `docs/pre-implementation.md` for the design boundary and safety rules.
 
-**Status: pre-release.** The Lighter and dYdX adapters are implemented with
-full unit suites, and both have passed the full testnet adoption-gate run.
+**Status: pre-release.** All three adapters are implemented with full unit
+suites. Lighter and dYdX have passed the full testnet adoption-gate run;
+Hyperliquid has not yet, so treat it as unproven against a live venue until it
+does — its signing is pinned to the venue's own reference test vectors, but no
+order has been placed through it.
 
 ## Install
 
@@ -51,6 +54,13 @@ Design invariants every adapter upholds:
   in between. The events channel is buffered; when full, the adapter blocks
   rather than drops — consume promptly. The channel closes only after
   `Close`.
+- **Quantization follows the venue's own rule.** Hyperliquid prices are not a
+  fixed tick: they carry at most five significant figures *and* at most
+  `6 - szDecimals` decimals, so the increment is recomputed per order from the
+  price's magnitude.
+- **Risk metadata errs toward the account.** Where a venue's maintenance margin
+  varies with position size, the single normalized fraction reports the
+  strictest requirement, never the most permissive.
 - **Venue lifetimes are made explicit.** dYdX short-term orders expire on
   their own after roughly fifteen blocks; the adapter reports that as an
   `OrderRejectedEvent` rather than letting a strategy believe a quote is
@@ -143,6 +153,46 @@ in-process from a small vendored protobuf set (`dydx/internal/pb`) rather than
 importing the dYdX chain module, whose forked cosmos-sdk pins do not resolve
 transitively.
 
+## Quickstart (Hyperliquid, testnet)
+
+```go
+exec, err := hyperliquid.New(hyperliquid.Config{
+    Credentials: hyperliquid.Credentials{
+        // The account that holds the position — the master account when an
+        // API wallet signs for it.
+        AccountAddress: os.Getenv("HYPERLIQUID_ACCOUNT_ADDRESS"), // 0x...
+        APIPrivateKey:  os.Getenv("HYPERLIQUID_API_PRIVATE_KEY"), // API (agent) wallet key
+        // Optional: route orders to a vault or subaccount instead.
+        VaultAddress: "",
+    },
+    Symbol:  "ETH-PERP",
+    Coin:    "ETH", // venue perp name
+    Network: hyperliquid.Testnet,
+})
+```
+
+Orders are signed as L1 actions: the action is MessagePack-encoded, framed with
+the nonce and vault address, hashed, and signed as EIP-712 typed data under the
+venue's fixed `Exchange` domain. Signing is implemented in-process and pinned to
+the reference implementation's published test vectors
+(`hyperliquid/signer_test.go`); only MessagePack comes from a third-party
+module, with keccak and secp256k1 taken from dependencies godex already uses.
+
+Post-only maps to the venue's `Alo` time-in-force, and a crossing maker is
+refused synchronously, so it returns `AckRejected` in the same call. Every order
+is submitted under a client order id minted before dispatch, which is also what
+a cancel is keyed by and what an ambiguous submission is reconciled against — an
+order the venue turns out to be holding is cancelled, since the caller never
+received an id it could close it with. Fills come from the `userFills` stream;
+position and margin are read from clearinghouse snapshots — at connect, on every
+fill, after a reconnect, and on a periodic backstop poll. Tracked orders are
+re-checked after a reconnect too, because order updates are pushed and never
+replayed.
+
+Maintenance margin on Hyperliquid is tiered — a perp advertising 25x drops to 5x
+above $50k of notional — so `MaintenanceMarginFraction`, which is a single
+ratio, carries the strictest tier rather than the headline one.
+
 ## Testnet smoke test (adoption gates)
 
 An adapter is adopted only after the full gate scenario passes on testnet:
@@ -163,6 +213,12 @@ DYDX_PRIVATE_KEY_HEX=... DYDX_ADDRESS=dydx1... [DYDX_SUBACCOUNT_NUMBER=0] \
   -ticker ETH-USD -symbol ETH-PERP -size 0.010 -reconnect-check
 ```
 
+```sh
+HYPERLIQUID_ACCOUNT_ADDRESS=0x... HYPERLIQUID_API_PRIVATE_KEY=0x... \
+  go run ./cmd/godex-smoke -venue hyperliquid -network testnet \
+  -coin ETH -symbol ETH-PERP -size 0.010 -reconnect-check
+```
+
 Each gate logs PASS/FAIL; any failure exits non-zero. `-record` streams raw
 account WS frames to JSONL for fixture refresh (Lighter only).
 
@@ -176,13 +232,15 @@ account WS frames to JSONL for fixture refresh (Lighter only).
   key, so register a dedicated key as a scoped on-chain authenticator
   (`accountplus`) and name it in `Credentials.AuthenticatorID`. The chain takes
   one authenticator per message, so compose several restrictions into a single
-  `AllOf` authenticator rather than listing them.
+  `AllOf` authenticator rather than listing them. On Hyperliquid, use an API
+  (agent) wallet: it can place and cancel orders but cannot withdraw or
+  transfer.
 - Use testnet keys for the smoke test. `.env*` and `*.jsonl` are gitignored;
   never commit key material or account recordings.
 
 ## Roadmap
 
-- `hyperliquid` adapter (EIP-712 actions, agent wallets)
+- Hyperliquid testnet adoption-gate run.
 
 ## Changelog
 

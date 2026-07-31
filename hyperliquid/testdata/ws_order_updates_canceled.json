@@ -1,0 +1,19 @@
+{
+  "channel": "orderUpdates",
+  "data": [
+    {
+      "order": {
+        "coin": "ETH",
+        "side": "B",
+        "limitPx": "2986.3",
+        "sz": "0.0",
+        "oid": 77738308,
+        "timestamp": 1753660000000,
+        "origSz": "0.5",
+        "cloid": "0x0000000000000000000000000000abcd"
+      },
+      "status": "canceled",
+      "statusTimestamp": 1753660001000
+    }
+  ]
+}

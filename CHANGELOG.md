@@ -11,6 +11,86 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
 ## Unreleased
 
+### Added
+
+- **`hyperliquid` adapter for Hyperliquid, not yet adopted.** It is implemented
+  with a full unit suite but has not been through the testnet adoption gate, so
+  it is not adopted under the rule above: no order has been placed through it
+  against a live venue. Orders are signed as L1 actions — the action is
+  MessagePack-encoded, framed with the nonce and vault address, hashed, and
+  signed as EIP-712 typed data under the venue's fixed `Exchange` domain — and
+  signing is pinned to the reference implementation's own published test
+  vectors, including the MessagePack preimage on its own so an encoder change
+  reports as an encoding fault rather than an unexplained signature mismatch.
+  Post-only maps to the `Alo` time-in-force and a crossing maker is refused
+  synchronously, so it returns `AckRejected` in the same call.
+- **`godex.VenueHyperliquid`.**
+- **Client order ids are minted before dispatch on Hyperliquid**, and are what
+  cancels are keyed by. An ambiguous submission therefore still leaves a handle:
+  the fault latch reconciles by asking the venue whether it holds that id. A
+  definitive "no" untracks the order rather than resending it; a "yes" is
+  cancelled, because the caller never received an ack and so has no id to
+  address that order with — leaving it resting would be exposure nobody could
+  close. An answer the adapter cannot read is treated the same way as no answer
+  at all: unknown, and latched. A cancel for an order the venue no longer holds
+  reports success, which is what makes a cancel retried after a timeout safe.
+- **Hyperliquid reconciles its tracked orders after every reconnect.** Order
+  updates are pushed and never replayed, so a cancellation that happened while
+  the socket was down would otherwise leave the order tracked forever and its
+  `OrderRejectedEvent` never delivered.
+- **Hyperliquid maintenance margin follows the venue's tier schedule.** A perp
+  advertising 25x drops to 5x above $50k of notional — five times the margin
+  requirement. `ExecutionMetadata` carries a single fraction, so the adapter
+  publishes the strictest tier: being too conservative costs position size,
+  while being too permissive costs the account. The venue omits its flat default
+  tables from the response and names them by the leverage they cap at; that
+  identity is checked rather than assumed, and a table that cannot be resolved
+  fails `Connect` instead of being guessed at.
+- **Hyperliquid verifies the account's margin mode before accepting an order.**
+  A clearinghouse snapshot omits coins the account is flat in, so a flat
+  account's mode is invisible there, and an order action carries no mode of its
+  own — an account left on isolated margin would have opened a position the
+  adapter's whole-account liquidation math cannot describe.
+- **Hyperliquid price quantization follows the venue's two-part rule** — at most
+  five significant figures *and* at most `6 - szDecimals` decimals, integers
+  always allowed — so the increment is recomputed per order from the price's
+  magnitude rather than being a fixed venue tick. Tests assert that rounding a
+  price in either direction never produces one the venue would refuse, including
+  against live book prices under `GODEX_LIVE_TESTNET`.
+- **Opt-in live wire checks for Hyperliquid**
+  (`GODEX_LIVE_TESTNET=1 go test ./hyperliquid -run TestLive`). They read public
+  endpoints only — no credentials, no order flow — and cover the universe, a
+  clearinghouse snapshot, the order-status query the fault latch reconciles
+  with, the margin-mode and agent lookups `Connect` performs, whether every
+  live perp's margin schedule resolves, and whether the venue still accepts the
+  adapter's subscriptions.
+- **`github.com/vmihailenco/msgpack/v5`**, the only new module: the venue signs
+  over a MessagePack encoding of the action. Keccak and secp256k1 come from
+  dependencies godex already had, the latter the same signer the dYdX adapter
+  uses.
+
+### Known limitations
+
+- Hyperliquid position and margin are read from clearinghouse snapshots rather
+  than pushed: at connect, immediately after every fill, after a reconnect, and
+  on a periodic backstop poll. A change this executor did not cause — funding, a
+  liquidation, another process on the same account — is therefore visible only
+  at the next poll.
+- Hyperliquid `Connect` warns, rather than fails, when the signing key is not a
+  listed agent of the account. The venue also has a single unnamed agent slot
+  that the listing does not cover, so refusing there would reject working
+  configurations; a genuinely wrong key is still refused at the first order.
+- The single `MaintenanceMarginFraction` describes the strictest tier of a
+  Hyperliquid perp's schedule, so risk logic sizing a small position against it
+  is more conservative than the venue requires.
+- An unrecognized Hyperliquid order status aborts the connection instead of
+  being guessed at. There is no safe default: treating a live order as closed
+  makes a strategy requote over its own resting quote, and treating a closed one
+  as live leaves it waiting for a fill that will never come. The documented set
+  is enumerated in `hyperliquid/constants.go` and asserted complete in the unit
+  suite, so a venue that adds a status surfaces as reconnect churn rather than
+  as a mis-tracked order.
+
 ### Fixed
 
 - **dYdX no longer publishes the unpriced position the stream reports after a
