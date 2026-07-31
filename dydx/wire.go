@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+
+	"github.com/DaisukeYoda/godex/decimal"
 )
 
 func missingField(object, field string) error {
@@ -121,9 +123,10 @@ func (r *perpetualMarketsResponse) market(ticker string) (*perpetualMarket, erro
 }
 
 // perpetualPosition is one open position. entryPrice and unrealizedPnl are
-// optional: WebSocket position updates sometimes omit them, which the executor
-// treats as a signal to re-read the REST snapshot rather than emit a partial
-// position.
+// optional: WebSocket position updates sometimes omit them, and sometimes send
+// entryPrice as zero alongside a real size, either of which the executor treats
+// as a signal to re-read the REST snapshot rather than emit a position it does
+// not believe.
 type perpetualPosition struct {
 	Market        *string `json:"market"`
 	Side          *string `json:"side"`
@@ -151,6 +154,34 @@ func (p *perpetualPosition) validate() error {
 // complete reports whether the position carries the priced fields godex needs.
 func (p *perpetualPosition) complete() bool {
 	return p.EntryPrice != nil && p.UnrealizedPnl != nil
+}
+
+// entryPriceUnsettled reports the transient the account stream emits in the
+// moment after a fill: the new size arrives with an entry price of zero, and an
+// unrealized PnL computed against that zero, before the next update carries
+// both corrected (testnet capture, 2026-07-27). Size at no price is not a state
+// the venue can be in, so an update claiming it is not one to publish.
+//
+// Only stream updates are judged this way. A REST snapshot is a settled read,
+// so whatever entry price it reports is the one the venue holds — which is also
+// what keeps refusing this transient from stalling: the refusal re-reads the
+// snapshot, and a zero that turns out to be real comes back through that path
+// rather than being suppressed again.
+func (p *perpetualPosition) entryPriceUnsettled() bool {
+	if p.EntryPrice == nil || p.Size == nil {
+		return false
+	}
+	// Values that do not parse are left for toPosition to report as errors,
+	// rather than being quietly reread as if they were this transient.
+	entryPrice, err := decimal.FromDecimalString(*p.EntryPrice)
+	if err != nil || !entryPrice.IsZero() {
+		return false
+	}
+	size, err := decimal.FromDecimalString(*p.Size)
+	if err != nil {
+		return false
+	}
+	return !size.IsZero()
 }
 
 // positionsContainer accepts both shapes the venue uses: the REST/subscribed

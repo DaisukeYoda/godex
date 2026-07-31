@@ -59,6 +59,9 @@ type fakeVenue struct {
 	marketsJSON     []byte
 	marketsGate     chan struct{} // when set, holds the markets response back
 	subaccountJSON  []byte
+	subaccountQueue []string      // served one per read, ahead of subaccountJSON
+	subaccountGate  chan struct{} // when set, holds the subaccount response back
+	subaccountReads int
 	fillsJSON       []byte
 	fillHistory     []map[string]any // newest first; enables real pagination
 	fillPageQueries []string
@@ -95,10 +98,21 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		}
 		_, _ = w.Write(body)
 	})
-	mux.HandleFunc("/v4/addresses/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/v4/addresses/", func(w http.ResponseWriter, r *http.Request) {
 		venue.mu.Lock()
-		body := venue.subaccountJSON
+		venue.subaccountReads++
+		body, gate := venue.subaccountJSON, venue.subaccountGate
+		if len(venue.subaccountQueue) > 0 {
+			body, venue.subaccountQueue = []byte(venue.subaccountQueue[0]), venue.subaccountQueue[1:]
+		}
 		venue.mu.Unlock()
+		if gate != nil {
+			select {
+			case <-gate:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_, _ = w.Write(body)
 	})
 	mux.HandleFunc("/v4/fills", func(w http.ResponseWriter, r *http.Request) {
@@ -346,6 +360,40 @@ func (v *fakeVenue) fillPageCount() int {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	return len(v.fillPageQueries)
+}
+
+// setSubaccount replaces the account snapshot the REST endpoint serves, so a
+// test can control what an out-of-band re-read finds.
+func (v *fakeVenue) setSubaccount(body string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.subaccountJSON = []byte(body)
+}
+
+// queueSubaccount serves these snapshots to the next reads, one each, before
+// falling back to the standing one — so a test can hand back a state that
+// settles partway through a sequence of reads.
+func (v *fakeVenue) queueSubaccount(bodies ...string) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.subaccountQueue = append(v.subaccountQueue, bodies...)
+}
+
+func (v *fakeVenue) subaccountReadCount() int {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return v.subaccountReads
+}
+
+// blockSubaccount holds the account snapshot response until the returned
+// function is called, so a test can run the stream while a re-read is in
+// flight.
+func (v *fakeVenue) blockSubaccount() func() {
+	gate := make(chan struct{})
+	v.mu.Lock()
+	v.subaccountGate = gate
+	v.mu.Unlock()
+	return sync.OnceFunc(func() { close(gate) })
 }
 
 func (v *fakeVenue) setFills(body string) {
@@ -1491,6 +1539,178 @@ func TestFillInAnotherMarketIsNotReportedAsOurs(t *testing.T) {
 		if fill, ok := event.(godex.FillEvent); ok && fill.Size.String() == "0.010" {
 			t.Fatalf("a BTC-USD fill was reported on the ETH-PERP stream: %+v", fill)
 		}
+	}
+}
+
+// positionFrame builds one channel_data position update for this executor's
+// market.
+func positionFrame(t *testing.T, size, entryPrice, unrealizedPnl string) []byte {
+	t.Helper()
+	frame, err := json.Marshal(map[string]any{
+		"type":    wsTypeChannelData,
+		"channel": subaccountsChannel,
+		"contents": map[string]any{
+			"perpetualPositions": []any{map[string]any{
+				"market":        testTicker,
+				"status":        "OPEN",
+				"side":          "LONG",
+				"size":          size,
+				"entryPrice":    entryPrice,
+				"unrealizedPnl": unrealizedPnl,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode position frame: %v", err)
+	}
+	return frame
+}
+
+// subaccountWithPosition rewrites the REST fixture's open position, so a test
+// can say what a snapshot re-read should find.
+func subaccountWithPosition(t *testing.T, size, entryPrice, unrealizedPnl string) string {
+	t.Helper()
+	var snapshot map[string]any
+	if err := json.Unmarshal(loadFixture(t, "subaccount_rest.json"), &snapshot); err != nil {
+		t.Fatalf("subaccount fixture decode: %v", err)
+	}
+	positions := snapshot["subaccount"].(map[string]any)["openPerpetualPositions"].(map[string]any)
+	position := positions[testTicker].(map[string]any)
+	position["size"] = size
+	position["entryPrice"] = entryPrice
+	position["unrealizedPnl"] = unrealizedPnl
+	body, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("encode subaccount: %v", err)
+	}
+	return string(body)
+}
+
+// TestZeroEntryPriceIsRereadNotEmitted: in the moment after a fill the stream
+// reports the new size with an entry price of zero, and an unrealized PnL
+// computed against that zero, before correcting both in the next update
+// (testnet, 2026-07-27). A consumer measuring liquidation distance off entry
+// price would read that as a position it does not hold, so the adapter re-reads
+// the snapshot instead of publishing it.
+func TestZeroEntryPriceIsRereadNotEmitted(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	// What the re-read finds: the position the venue settles on.
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "1954.9", "-0.028215654"))
+
+	mark := collector.Mark()
+	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
+
+	// The first position after the transient is the one that matters: had the
+	// transient been emitted, it would be this event.
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"position", isPositionEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := event.(godex.PositionEvent).Position
+	if position.EntryPrice.String() != "1954.9" {
+		t.Fatalf("entry price = %s, want the re-read 1954.9", position.EntryPrice)
+	}
+	if position.UnrealizedPnL.String() != "-0.028215654" {
+		t.Fatalf("unrealized pnl = %s, want the re-read -0.028215654", position.UnrealizedPnL)
+	}
+	if position.Size.String() != "0.002" {
+		t.Fatalf("position size = %s, want 0.002", position.Size)
+	}
+}
+
+// TestZeroEntryPriceSurvivingIntoTheSnapshotIsRereadAgain: REST is served from
+// the same Indexer state as the stream, so the re-read can land before the
+// venue has priced the position. Taking that first answer would publish the
+// exact number the re-read exists to avoid, so the snapshot is read again until
+// it settles.
+func TestZeroEntryPriceSurvivingIntoTheSnapshotIsRereadAgain(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	// The first re-read still carries the transient; the second has settled.
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "1954.9", "-0.028215654"))
+	venue.queueSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
+
+	mark := collector.Mark()
+	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
+
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"position", isPositionEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := event.(godex.PositionEvent).Position
+	if position.EntryPrice.String() != "1954.9" {
+		t.Fatalf("entry price = %s, want the settled 1954.9", position.EntryPrice)
+	}
+	if position.UnrealizedPnL.String() != "-0.028215654" {
+		t.Fatalf("unrealized pnl = %s, want the settled -0.028215654", position.UnrealizedPnL)
+	}
+}
+
+// TestZeroEntryPriceThatIsRealIsStillPublished: refusing the transient must not
+// become a way to suppress a position outright. A zero that repeats across
+// reads is the venue's answer rather than a moment in flight, so it is
+// published — after a bounded number of reads, not indefinitely many.
+func TestZeroEntryPriceThatIsRealIsStillPublished(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	venue.setSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
+
+	mark := collector.Mark()
+	before := venue.subaccountReadCount()
+	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
+
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
+		"position", isPositionEvent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	position := event.(godex.PositionEvent).Position
+	if position.Size.String() != "0.002" || !position.EntryPrice.IsZero() {
+		t.Fatalf("position = size %s at %s, want 0.002 at 0", position.Size, position.EntryPrice)
+	}
+	if reads := venue.subaccountReadCount() - before; reads != positionPriceReads {
+		t.Fatalf("%d snapshot reads, want %d: the confirmation must be bounded",
+			reads, positionPriceReads)
+	}
+}
+
+// TestSnapshotRereadIsSequencedBeforeLaterStreamUpdates: the re-read runs on its
+// own goroutine, but its observation sequence has to be reserved before the
+// stream reader moves on. Reserving it inside the goroutine leaves the ordering
+// to the scheduler, and losing that race lets a REST response describing an
+// older state outrank — and overwrite — the corrected update the reader handled
+// in the meantime.
+func TestSnapshotRereadIsSequencedBeforeLaterStreamUpdates(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	// Hold the response so the re-read cannot finish and reserve late by luck.
+	release := venue.blockSubaccount()
+	defer release()
+
+	executor.stateMu.Lock()
+	before := executor.observationSeq
+	executor.stateMu.Unlock()
+
+	executor.requestSnapshotRefresh()
+
+	executor.stateMu.Lock()
+	after := executor.observationSeq
+	executor.stateMu.Unlock()
+	if after <= before {
+		t.Fatalf("observation sequence %d unchanged from %d: the re-read must be "+
+			"sequenced before requestSnapshotRefresh returns, so an update handled "+
+			"afterwards outranks it", after, before)
 	}
 }
 

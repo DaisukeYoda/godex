@@ -140,6 +140,14 @@ const (
 	// margin is refreshed over REST on this interval.
 	snapshotPollInterval = 5 * time.Second
 
+	// A position with size at a zero entry price is the transient the account
+	// stream emits in the moment after a fill. REST is read from the same
+	// Indexer state and can report it too, so a snapshot showing it is read up
+	// to this many times, this far apart, before being taken at its word. The
+	// observed correction arrived in the next update, within the same second.
+	positionPriceReads       = 3
+	positionPriceRereadDelay = 150 * time.Millisecond
+
 	// Timeout for plain REST GETs (market metadata, fills, orders).
 	restRequestTimeout = 30 * time.Second
 

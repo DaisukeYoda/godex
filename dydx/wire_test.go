@@ -8,6 +8,10 @@ import (
 	"testing"
 )
 
+// ptr builds the optional wire fields, which are pointers so that "absent" and
+// "present but empty" stay distinguishable.
+func ptr[T any](value T) *T { return &value }
+
 func loadFixture(t *testing.T, name string) []byte {
 	t.Helper()
 	data, err := os.ReadFile(filepath.Join("testdata", name))
@@ -123,6 +127,36 @@ func TestDecodeSubaccountREST(t *testing.T) {
 	}
 	if !positions[0].complete() {
 		t.Fatal("REST snapshot positions carry entryPrice and unrealizedPnl")
+	}
+}
+
+// TestEntryPriceUnsettled pins which positions count as the post-fill transient:
+// only a real size at a zero entry price. A flat position is priced at zero
+// legitimately, and anything unparseable belongs to toPosition's error path
+// rather than being swallowed as a re-read.
+func TestEntryPriceUnsettled(t *testing.T) {
+	cases := []struct {
+		name       string
+		size       *string
+		entryPrice *string
+		want       bool
+	}{
+		{"post-fill transient", ptr("0.002"), ptr("0"), true},
+		{"transient with decimal zero", ptr("0.002"), ptr("0.0"), true},
+		{"short side reports an unsigned size", ptr("0.006"), ptr("0"), true},
+		{"priced position", ptr("0.002"), ptr("1954.9"), false},
+		{"flat position", ptr("0"), ptr("0"), false},
+		{"entryPrice absent is complete()'s business", ptr("0.002"), nil, false},
+		{"unparseable entryPrice", ptr("0.002"), ptr("abc"), false},
+		{"unparseable size", ptr("abc"), ptr("0"), false},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			position := perpetualPosition{Size: testCase.size, EntryPrice: testCase.entryPrice}
+			if got := position.entryPriceUnsettled(); got != testCase.want {
+				t.Fatalf("entryPriceUnsettled() = %v, want %v", got, testCase.want)
+			}
+		})
 	}
 }
 

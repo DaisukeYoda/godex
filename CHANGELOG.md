@@ -9,6 +9,33 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
+## Unreleased
+
+### Fixed
+
+- **dYdX no longer publishes the unpriced position the stream reports after a
+  fill.** In that moment the account stream reports the new size with an entry
+  price of zero, and an unrealized PnL computed against that zero, correcting
+  both in the next update ([#4](https://github.com/DaisukeYoda/godex/issues/4)).
+  Size at no price is not a state the venue can be in, so the adapter re-reads
+  the REST snapshot instead of emitting it, as it already did for updates that
+  omit the priced fields outright. Consumers sizing off position size alone were
+  unaffected; one measuring liquidation distance or PnL from entry price could
+  briefly read a position the account did not hold.
+
+  REST is served from the same Indexer state, so the re-read can catch the
+  transient too: a snapshot still showing it is read up to three times, 150ms
+  apart, before being believed. A zero that repeats across those reads is
+  published — it is the venue's answer rather than a moment in flight, and
+  refusing it indefinitely would strand a position that really is unpriced.
+- **A dYdX snapshot re-read can no longer overwrite a newer stream update.** The
+  re-read runs on its own goroutine and reserved its observation sequence there,
+  so a position update handled by the stream reader in the interim could be
+  given the *lower* sequence and then be overwritten by a REST response
+  describing an older state — including, when the re-read was prompted by the
+  transient above, by the very zero-priced position it went to replace. The
+  sequence is now reserved before the goroutine starts.
+
 ## v0.2.0 — dYdX v4 adapter
 
 Adds `dydx`, alongside the existing `lighter`. Both adapters have now passed
