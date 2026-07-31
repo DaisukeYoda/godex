@@ -81,6 +81,16 @@ type OrderRejectedEvent struct {
 	Reason  string
 }
 
+// ReasonCanceledByRequest is the reason an adapter reports for an order the
+// caller cancelled itself, once the venue has confirmed the cancel. Every
+// other reason is the venue's own wording, passed through; this one is the
+// adapter's, so a caller-initiated cancel reads the same on every venue.
+//
+// A cancel the venue reports as already-moot — never placed, already gone,
+// past its expiry — does not carry this reason. That order's real fate is
+// whatever retired it, and it is reported by the path that observed it.
+const ReasonCanceledByRequest = "canceled by request"
+
 // ConnectedEvent reports that the account stream is up and the initial (or
 // post-reconnect) snapshot follows.
 type ConnectedEvent struct {

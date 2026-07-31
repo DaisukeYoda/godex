@@ -534,6 +534,51 @@ func TestCancelIsIdempotentlyRecoverableAfterTimeout(t *testing.T) {
 	}
 }
 
+// A cancel the venue accepts reports the order finished. The account stream
+// reports only post-only cancellations, so without this a caller-initiated
+// cancel would produce no event at all — and this adapter would disagree with
+// the others about what a cancel means.
+func TestCancelOrderReportsTheOrderFinishedExactlyOnce(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout, "rejection",
+		func(e godex.AccountEvent) bool {
+			rejected, ok := e.(godex.OrderRejectedEvent)
+			return ok && rejected.OrderID == ack.OrderID
+		})
+	if err != nil {
+		t.Fatalf("a confirmed cancel reported nothing: %v", err)
+	}
+	if reason := event.(godex.OrderRejectedEvent).Reason; reason != godex.ReasonCanceledByRequest {
+		t.Errorf("rejection reason = %q, want %q", reason, godex.ReasonCanceledByRequest)
+	}
+
+	// A retried cancel is idempotent venue-side; it must not report twice.
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
+		t.Fatalf("second CancelOrder: %v", err)
+	}
+	count := 0
+	for _, event := range collector.Events()[mark:] {
+		if rejected, ok := event.(godex.OrderRejectedEvent); ok && rejected.OrderID == ack.OrderID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
+	}
+}
+
 func TestCancelUnknownOrder(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, _ := newTestExecutor(t, venue)

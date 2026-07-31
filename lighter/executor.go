@@ -458,6 +458,10 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 		// Any nonce resync already happened inside submitSignedTx.
 		return fmt.Errorf("lighter: cancel failed: %s", failure)
 	}
+	// The venue accepted the cancel, so the order is finished and said so
+	// here. The account stream reports only post-only cancellations, so a
+	// caller-initiated one would otherwise go unreported entirely.
+	e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: godex.ReasonCanceledByRequest})
 	return nil
 }
 

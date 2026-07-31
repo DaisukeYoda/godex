@@ -982,6 +982,49 @@ func TestCancelOrderSignsTrackedOrder(t *testing.T) {
 	}
 }
 
+// A cancel the chain accepts reports the order finished, rather than leaving
+// that to the Indexer's removal — which races the untrack CancelOrder performs
+// and so arrives only sometimes. The Indexer's copy adds no second event.
+func TestCancelOrderReportsTheOrderFinishedExactlyOnce(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, fake, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	params := fake.lastPlace(t)
+	mark := collector.Mark()
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout, "rejection",
+		isRejectionFor(ack.OrderID))
+	if err != nil {
+		t.Fatalf("a confirmed cancel reported nothing: %v", err)
+	}
+	if reason := event.(godex.OrderRejectedEvent).Reason; reason != godex.ReasonCanceledByRequest {
+		t.Errorf("rejection reason = %q, want %q", reason, godex.ReasonCanceledByRequest)
+	}
+
+	// The Indexer reports the removal afterwards, as it does whenever the
+	// cancel response wins the race.
+	venue.push(orderFrame(t, params.clientID, "venue-order-1", orderStatusCanceled, nil))
+	time.Sleep(200 * time.Millisecond)
+
+	count := 0
+	for _, event := range collector.Events()[mark:] {
+		if rejected, ok := event.(godex.OrderRejectedEvent); ok && rejected.OrderID == ack.OrderID {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
+	}
+}
+
 // TestCancelOrderAfterExpiryIsIdempotent: a short-term order past its expiry
 // block is already gone, so canceling it must succeed quietly instead of
 // failing against a venue that has forgotten it.
@@ -1469,8 +1512,12 @@ func TestFilledOrdersAreRetiredWithoutARejection(t *testing.T) {
 		t.Fatalf("venue-id mapping holds %d entries for %d orders", byVenue, orders)
 	}
 
+	// The drain loop above cancels until the order is gone, and a cancel the
+	// chain accepts reports itself — those are the caller's own, not the
+	// stream calling a filled order rejected, which is what this guards.
 	for _, event := range collector.Events()[mark:] {
-		if rejected, ok := event.(godex.OrderRejectedEvent); ok {
+		rejected, ok := event.(godex.OrderRejectedEvent)
+		if ok && rejected.Reason != godex.ReasonCanceledByRequest {
 			t.Fatalf("a filled order was reported as rejected: %+v", rejected)
 		}
 	}

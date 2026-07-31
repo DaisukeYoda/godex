@@ -584,6 +584,10 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 		return fmt.Errorf("dydx: cancel failed with code %d: %s", result.code, result.log)
 	}
 	e.untrackOrder(id)
+	// The chain accepted the cancel, so the order is finished and said so
+	// here. Waiting for the Indexer's removal instead would report it only
+	// when that update happens to arrive before the untrack above.
+	e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: godex.ReasonCanceledByRequest})
 	return nil
 }
 

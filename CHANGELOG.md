@@ -109,6 +109,20 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
   strategy that counted rejections, or treated one as a signal to re-quote,
   was acting on the same order twice; one that keyed off the order id was
   already immune.
+- **A cancel the venue confirms now reports the order finished, on every
+  adapter**, with the new `godex.ReasonCanceledByRequest`. The same race ran
+  the other way here: `CancelOrder` untracks on success and the account
+  stream's update is only emitted for an order still tracked, so the
+  `OrderRejectedEvent` for a caller's own cancel arrived only when the venue's
+  push beat the cancel response. Across three otherwise identical testnet
+  runs it appeared twice and went missing once. Lighter never emitted one at
+  all — its stream reports only post-only cancellations — so the three
+  adapters did not agree on what a cancel means. The event is now emitted by
+  `CancelOrder` itself, and the stream's later copy is absorbed by the
+  deduplication above. A cancel the venue reports as already moot — never
+  placed, already gone, past its expiry block — still emits nothing under this
+  reason: that order's fate is whatever retired it, which may be a fill, and
+  is reported by the path that observed it.
 - **dYdX no longer publishes the unpriced position the stream reports after a
   fill.** In that moment the account stream reports the new size with an entry
   price of zero, and an unrealized PnL computed against that zero, correcting

@@ -519,6 +519,10 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 		return fmt.Errorf("hyperliquid: cancel failed: %s", message)
 	}
 	e.untrackOrder(id)
+	// The venue confirmed the cancel, so the order is finished and said so
+	// here. Waiting for the orderUpdates push instead would report it only
+	// when that push happens to arrive before the untrack above.
+	e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: godex.ReasonCanceledByRequest})
 	return nil
 }
 

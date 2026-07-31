@@ -662,6 +662,73 @@ func countFills(events []godex.AccountEvent) int {
 	return count
 }
 
+// A cancel the caller asked for reports the order finished, whether or not the
+// account stream's own update for it arrives — and the stream's copy, which
+// races the untrack that CancelOrder performs, does not add a second.
+func TestCancelOrderReportsTheOrderFinishedExactlyOnce(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	venue.queueExchange(scriptedExchange{
+		body: `{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}`,
+	})
+
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	event, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "rejection", isRejectionEvent)
+	if err != nil {
+		t.Fatalf("a confirmed cancel reported nothing: %v", err)
+	}
+	rejection := event.(godex.OrderRejectedEvent)
+	if rejection.OrderID != ack.OrderID || rejection.Reason != godex.ReasonCanceledByRequest {
+		t.Errorf("rejection = %+v, want %s cancelled by request", rejection, ack.OrderID)
+	}
+
+	// The venue's own update lands afterwards, as it does whenever the cancel
+	// response wins the race.
+	venue.push(t, orderUpdateFrame(string(ack.OrderID), "canceled"))
+	if _, _, err := collector.WaitForAt(t.Context(), mark, 500*time.Millisecond, "second rejection",
+		func(e godex.AccountEvent) bool {
+			rejected, ok := e.(godex.OrderRejectedEvent)
+			return ok && rejected.Reason != godex.ReasonCanceledByRequest
+		}); err == nil {
+		t.Error("the account stream's copy of the cancel was reported a second time")
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
+	}
+}
+
+// A cancel the venue reports as already moot says nothing about why the order
+// is gone — it may have filled — so it must not be reported as cancelled.
+func TestCancelOrderOfAnAlreadyGoneOrderReportsNothing(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	venue.queueExchange(scriptedExchange{
+		body: `{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"error":` +
+			`"Order was never placed, already canceled, or filled. asset=4"}]}}}`,
+	})
+
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("an already-moot cancel reported the order cancelled %d times, want 0", count)
+	}
+}
+
 func countRejectionsFor(events []godex.AccountEvent, id godex.OrderID) int {
 	count := 0
 	for _, event := range events {

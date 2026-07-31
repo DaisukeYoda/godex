@@ -62,6 +62,11 @@ Design invariants every adapter upholds:
   their own after roughly fifteen blocks; the adapter reports that as an
   `OrderRejectedEvent` rather than letting a strategy believe a quote is
   still live.
+- **An order finishes exactly once.** Every end of an order — crossed,
+  expired, cancelled — is one `OrderRejectedEvent`, whichever path observed
+  it first. A cancel the venue confirms reports itself with the reason
+  `godex.ReasonCanceledByRequest` rather than waiting on an account-stream
+  update that may or may not still find the order tracked.
 - **Money is fixed-point.** All prices/sizes use `decimal.Decimal` (big-int
   mantissa + scale, string-only construction, round half away from zero).
   No floats anywhere near order flow.
