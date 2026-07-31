@@ -11,10 +11,7 @@ exactly what a post-only maker / IOC taker strategy needs. See
 `docs/pre-implementation.md` for the design boundary and safety rules.
 
 **Status: pre-release.** All three adapters are implemented with full unit
-suites. Lighter and dYdX have passed the full testnet adoption-gate run;
-Hyperliquid has not yet, so treat it as unproven against a live venue until it
-does — its signing is pinned to the venue's own reference test vectors, but no
-order has been placed through it.
+suites, and all three have passed the full testnet adoption-gate run.
 
 ## Install
 
@@ -237,10 +234,6 @@ account WS frames to JSONL for fixture refresh (Lighter only).
   transfer.
 - Use testnet keys for the smoke test. `.env*` and `*.jsonl` are gitignored;
   never commit key material or account recordings.
-
-## Roadmap
-
-- Hyperliquid testnet adoption-gate run.
 
 ## Changelog
 

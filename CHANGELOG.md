@@ -13,13 +13,15 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
 ### Added
 
-- **`hyperliquid` adapter for Hyperliquid, not yet adopted.** It is implemented
-  with a full unit suite but has not been through the testnet adoption gate, so
-  it is not adopted under the rule above: no order has been placed through it
-  against a live venue. Orders are signed as L1 actions — the action is
-  MessagePack-encoded, framed with the nonce and vault address, hashed, and
-  signed as EIP-712 typed data under the venue's fixed `Exchange` domain — and
-  signing is pinned to the reference implementation's own published test
+- **`hyperliquid` adapter for Hyperliquid, adopted.** The full adoption-gate
+  scenario passes on testnet: connect and verified snapshot, far post-only and
+  cancel, a crossing post-only refused as `badAloPxRejected` on the normal path,
+  IOC fill and long position, a forced reconnect that reconverged on the open
+  position with no duplicate fills, and a reduce-only close back to flat.
+  Orders are signed as L1 actions — the action is MessagePack-encoded, framed
+  with the nonce and vault address, hashed, and signed as EIP-712 typed data
+  under the venue's fixed `Exchange` domain — and signing is additionally
+  pinned to the reference implementation's own published test
   vectors, including the MessagePack preimage on its own so an encoder change
   reports as an encoding fault rather than an unexplained signature mismatch.
   Post-only maps to the `Alo` time-in-force and a crossing maker is refused
