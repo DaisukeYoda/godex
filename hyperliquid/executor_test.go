@@ -662,6 +662,76 @@ func countFills(events []godex.AccountEvent) int {
 	return count
 }
 
+func countRejectionsFor(events []godex.AccountEvent, id godex.OrderID) int {
+	count := 0
+	for _, event := range events {
+		if rejection, ok := event.(godex.OrderRejectedEvent); ok && rejection.OrderID == id {
+			count++
+		}
+	}
+	return count
+}
+
+// A crossing post-only is reported twice by the venue: once as the answer to
+// the submission and once as an order update on the account stream. On
+// testnet the push routinely beats the HTTP response, so the order is still
+// tracked when the stream reports it and both paths reach send. The caller
+// must still see one rejection — the second is the same fact, and a strategy
+// counting rejections would otherwise double-count.
+func TestCrossingPostOnlyIsRejectedOnceWhenTheStreamWinsTheRace(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	mark := collector.Mark()
+
+	// The response is held back so the order update lands first — but by well
+	// under TxRequestTimeout, so this stays a race between two answers rather
+	// than becoming an ambiguous submission.
+	venue.queueExchange(scriptedExchange{
+		delay: 120 * time.Millisecond,
+		body: `{"status":"ok","response":{"type":"order","data":{"statuses":[{"error":` +
+			`"Post only order would have immediately matched, bbo was 2986.2"}]}}}`,
+	})
+
+	type placement struct {
+		ack godex.OrderAck
+		err error
+	}
+	placed := make(chan placement, 1)
+	go func() {
+		ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+		placed <- placement{ack: ack, err: err}
+	}()
+
+	// The action is recorded before the scripted delay, so the client order
+	// id the stream must echo is readable while the response is in flight.
+	deadline := time.Now().Add(testEventTimeout)
+	for venue.exchangeCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the order action never reached the venue")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	venue.push(t, orderUpdateFrame(venue.lastOrderWire(t).Cloid, "badAloPxRejected"))
+
+	result := <-placed
+	if result.err != nil {
+		t.Fatalf("PlaceOrder returned an error for a crossing post-only: %v", result.err)
+	}
+	if result.ack.Status != godex.AckRejected {
+		t.Fatalf("ack status = %s, want %s", result.ack.Status, godex.AckRejected)
+	}
+	if _, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "rejection",
+		isRejectionEvent); err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+	// Both paths have now run: the stream's update was consumed above and the
+	// submission has returned. Anything the losing path emitted is present.
+	if count := countRejectionsFor(collector.Events()[mark:], result.ack.OrderID); count != 1 {
+		t.Errorf("order was rejected %d times, want 1", count)
+	}
+}
+
 // --- regressions for the reconciliation and lifecycle gaps ---
 
 // An order left resting by an unknown outcome is one the caller cannot

@@ -95,6 +95,20 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
 ### Fixed
 
+- **An order's rejection is now reported at most once, on every adapter.** Two
+  paths observe the same outcome — the venue's answer to the submission and the
+  account stream's own order update — and nothing orders them against each
+  other. All three adapters relied on the submission path retiring the order
+  before the stream reached it, which held only as long as the stream lagged.
+  It does not on Hyperliquid: the testnet adoption run had the `orderUpdates`
+  push beat the HTTP response on every crossing post-only, so both paths
+  emitted and a caller saw one order rejected twice, under two different
+  reason strings. Rejections are now deduplicated by order id at the single
+  point every event passes through (`internal/dedupe`), which also absorbs the
+  order statuses Lighter's account snapshot replays after a reconnect. A
+  strategy that counted rejections, or treated one as a signal to re-quote,
+  was acting on the same order twice; one that keyed off the order id was
+  already immune.
 - **dYdX no longer publishes the unpriced position the stream reports after a
   fill.** In that moment the account stream reports the new size with an entry
   price of zero, and an unrealized PnL computed against that zero, correcting

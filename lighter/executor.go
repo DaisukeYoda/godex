@@ -15,6 +15,7 @@ import (
 
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
+	"github.com/DaisukeYoda/godex/internal/dedupe"
 	"github.com/DaisukeYoda/godex/internal/ws"
 	"github.com/elliottech/lighter-go/types/txtypes"
 )
@@ -32,6 +33,7 @@ type Executor struct {
 	logger *slog.Logger
 
 	events          chan godex.AccountEvent
+	rejections      *dedupe.Set[godex.OrderID]
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
 
@@ -86,6 +88,7 @@ func New(cfg Config) (*Executor, error) {
 		cfg:             resolved,
 		logger:          resolved.logger,
 		events:          make(chan godex.AccountEvent, godex.DefaultAccountEventBuffer),
+		rejections:      dedupe.NewSet[godex.OrderID](dedupe.RejectionCapacity),
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		orders:          make(map[godex.OrderID]int64),
@@ -870,7 +873,20 @@ func (e *Executor) clearAuthRefresh() {
 // attempt guarantees delivery whenever the buffer has room — in particular
 // the final DisconnectedEvent during Close, which runs with the lifecycle
 // context already canceled.
+//
+// One order's rejection is reported at most once. Two paths observe the same
+// outcome — sendTx's own answer to the submission and the account stream's
+// order status — and neither is ordered against the other, so the losing path
+// is dropped here rather than at each call site. This also absorbs the order
+// statuses an account snapshot replays after a reconnect. The dropped copy
+// carries no news: OrderRejectedEvent means the order is finished, which is
+// not a fact that can arrive twice with different content.
 func (e *Executor) send(event godex.AccountEvent) {
+	if rejection, ok := event.(godex.OrderRejectedEvent); ok {
+		if !e.rejections.Observe(rejection.OrderID) {
+			return
+		}
+	}
 	select {
 	case e.events <- event:
 		return
