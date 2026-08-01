@@ -534,11 +534,11 @@ func TestCancelIsIdempotentlyRecoverableAfterTimeout(t *testing.T) {
 	}
 }
 
-// A cancel the venue accepts reports the order finished. The account stream
-// reports only post-only cancellations, so without this a caller-initiated
-// cancel would produce no event at all — and this adapter would disagree with
-// the others about what a cancel means.
-func TestCancelOrderReportsTheOrderFinishedExactlyOnce(t *testing.T) {
+// Accepting a cancel transaction is not the order having ended by it: this
+// venue accepts and then rejects asynchronously. So nothing is reported until
+// the account stream says how the order actually ended — and when it does, a
+// cancel the caller asked for reads under the shared reason.
+func TestCancelOrderIsReportedWhenTheStreamConfirmsIt(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, collector := newTestExecutor(t, venue)
 	mustConnect(t, executor)
@@ -551,32 +551,67 @@ func TestCancelOrderReportsTheOrderFinishedExactlyOnce(t *testing.T) {
 	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
 		t.Fatalf("CancelOrder: %v", err)
 	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("an accepted cancel reported an outcome %d times before the venue said one", count)
+	}
+	// The order is no longer addressable, even though it is still tracked.
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); !errors.Is(err, godex.ErrUnknownOrder) {
+		t.Errorf("second CancelOrder = %v, want ErrUnknownOrder", err)
+	}
 
+	venue.push(t, postOnlyCanceledFrame(t, ack.OrderID))
 	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout, "rejection",
 		func(e godex.AccountEvent) bool {
 			rejected, ok := e.(godex.OrderRejectedEvent)
 			return ok && rejected.OrderID == ack.OrderID
 		})
 	if err != nil {
-		t.Fatalf("a confirmed cancel reported nothing: %v", err)
+		t.Fatalf("rejection: %v", err)
 	}
 	if reason := event.(godex.OrderRejectedEvent).Reason; reason != godex.ReasonCanceledByRequest {
 		t.Errorf("rejection reason = %q, want %q", reason, godex.ReasonCanceledByRequest)
 	}
-
-	// A retried cancel is idempotent venue-side; it must not report twice.
-	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
-		t.Fatalf("second CancelOrder: %v", err)
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
 	}
+	// A finished order stops being tracked, so the map does not grow for the
+	// process's lifetime.
+	executor.stateMu.Lock()
+	_, still := executor.orders[ack.OrderID]
+	executor.stateMu.Unlock()
+	if still {
+		t.Error("a finished order is still tracked")
+	}
+}
+
+// postOnlyCanceledFrame is the account-stream frame reporting one order
+// finished, keyed to an order this executor actually placed (the fixture
+// carries a fixed client order index).
+func postOnlyCanceledFrame(t *testing.T, id godex.OrderID) []byte {
+	t.Helper()
+	clientOrderIndex, err := strconv.ParseInt(string(id), 10, 64)
+	if err != nil {
+		t.Fatalf("order id %q is not a client order index: %v", id, err)
+	}
+	return fmt.Appendf(nil, `{"channel":"account_all_orders:48","type":"update/account_all_orders",`+
+		`"orders":{"2":[{"order_index":1125899906551881,"client_order_index":%d,`+
+		`"order_id":"1125899906551881","client_order_id":"%d","market_index":2,`+
+		`"owner_account_index":48,"initial_base_amount":"0.200","price":"82.930",`+
+		`"nonce":281474976419913,"remaining_base_amount":"0.000","is_ask":false,`+
+		`"filled_base_amount":"0.000","filled_quote_amount":"0.000000","type":"limit",`+
+		`"time_in_force":"post-only","reduce_only":false,"trigger_price":"0.000",`+
+		`"order_expiry":1785601477198,"status":"canceled-post-only","block_height":10630,`+
+		`"timestamp":1783182277}]}}`, clientOrderIndex, clientOrderIndex)
+}
+
+func countRejectionsFor(events []godex.AccountEvent, id godex.OrderID) int {
 	count := 0
-	for _, event := range collector.Events()[mark:] {
-		if rejected, ok := event.(godex.OrderRejectedEvent); ok && rejected.OrderID == ack.OrderID {
+	for _, event := range events {
+		if rejected, ok := event.(godex.OrderRejectedEvent); ok && rejected.OrderID == id {
 			count++
 		}
 	}
-	if count != 1 {
-		t.Errorf("order was reported finished %d times, want 1", count)
-	}
+	return count
 }
 
 func TestCancelUnknownOrder(t *testing.T) {

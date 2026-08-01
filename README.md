@@ -64,9 +64,12 @@ Design invariants every adapter upholds:
   still live.
 - **An order finishes exactly once.** Every end of an order — crossed,
   expired, cancelled — is one `OrderRejectedEvent`, whichever path observed
-  it first. A cancel the venue confirms reports itself with the reason
-  `godex.ReasonCanceledByRequest` rather than waiting on an account-stream
-  update that may or may not still find the order tracked.
+  it first. An order that ended by a cancel the caller asked for carries
+  `godex.ReasonCanceledByRequest` on every venue, and an adapter reports it
+  only once the venue says the order ended: accepting a cancel means the
+  request was valid, not that it applied, and one accepted as the order
+  filled applied to nothing. Lighter cannot observe a plain cancellation at
+  all — see its package comment.
 - **Money is fixed-point.** All prices/sizes use `decimal.Decimal` (big-int
   mantissa + scale, string-only construction, round half away from zero).
   No floats anywhere near order flow.

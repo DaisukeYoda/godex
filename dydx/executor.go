@@ -103,10 +103,16 @@ type Executor struct {
 	hasMarginSnapshot    bool
 	accountInvalid       *accountInvalidObservation
 	orders               map[godex.OrderID]orderRef
-	orderIDsByClientID   map[uint32]godex.OrderID
-	orderIDsByVenueID    map[string]venueOrderRef
-	clientIDCounter      uint32
-	seenFills            map[string]time.Time
+	// canceling holds orders whose cancel the chain accepted. They stay
+	// tracked, because acceptance says the transaction was valid, not that
+	// the order ended by it — a cancel accepted the instant the order filled
+	// applies to nothing. Membership makes a second cancel unaddressable and
+	// labels the terminal event when the Indexer reports one.
+	canceling          map[godex.OrderID]struct{}
+	orderIDsByClientID map[uint32]godex.OrderID
+	orderIDsByVenueID  map[string]venueOrderRef
+	clientIDCounter    uint32
+	seenFills          map[string]time.Time
 	// fillFloor is the instant through which the account's fills predate this
 	// executor. Backfills never look past it, so a long history cannot be
 	// mistaken for executions this executor missed.
@@ -136,6 +142,7 @@ func New(cfg Config) (*Executor, error) {
 		lifecycleCtx:       lifecycleCtx,
 		lifecycleCancel:    lifecycleCancel,
 		orders:             make(map[godex.OrderID]orderRef),
+		canceling:          make(map[godex.OrderID]struct{}),
 		orderIDsByClientID: make(map[uint32]godex.OrderID),
 		orderIDsByVenueID:  make(map[string]venueOrderRef),
 		seenFills:          make(map[string]time.Time),
@@ -553,19 +560,32 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 
 	e.stateMu.Lock()
 	ref, tracked := e.orders[id]
+	_, alreadyCanceling := e.canceling[id]
+	if tracked && !alreadyCanceling {
+		// Recorded before dispatch, not after the answer: the Indexer can
+		// report the order gone while the cancel is still in flight, and the
+		// reason that report carries must not depend on which of the two
+		// lands first. An order being cancelled is also no longer
+		// addressable, so a second cancel has nothing to act on.
+		e.canceling[id] = struct{}{}
+	}
 	e.stateMu.Unlock()
-	if !tracked {
+	if !tracked || alreadyCanceling {
 		return fmt.Errorf("%w: %s", godex.ErrUnknownOrder, id)
 	}
 
 	goodTilBlock, err := e.height.goodTilBlock()
 	if err != nil {
+		e.clearCancelIntent(id)
 		return err
 	}
 	// A short-term order past its expiry block is already gone; the chain would
 	// reject a cancel for it. Canceling something the venue has forgotten is
 	// exactly the case that must stay idempotent.
 	if goodTilBlock-shortBlockForward >= ref.goodTilBlock {
+		// It expired rather than being cancelled, and the Indexer's expiry
+		// removal reports it; untracking drops the intent with the order so
+		// that report is not relabelled as the caller's cancel.
 		e.untrackOrder(id)
 		return nil
 	}
@@ -574,20 +594,28 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 		orderIdentity: e.orderIdentity(ref.clientID),
 		goodTilBlock:  goodTilBlock,
 	}
+	// A cancel that did not take leaves the order addressable again, so the
+	// intent is withdrawn on every path that does not return success —
+	// including an unknown outcome, because a cancel is idempotent and
+	// retrying it is how that fault recovers. The cost is that a cancel which
+	// did apply after an unknown outcome is reported under the Indexer's own
+	// wording; that is the honest answer, since the adapter never learned its
+	// cancel was the cause.
 	result, err := e.submitTx(ctx, goodTilBlock, func(envelope txParams) ([]byte, error) {
 		return e.signer.signCancelOrder(params, envelope)
 	})
 	if err != nil {
+		e.clearCancelIntent(id)
 		return err
 	}
 	if result.outcome != broadcastAccepted {
+		e.clearCancelIntent(id)
 		return fmt.Errorf("dydx: cancel failed with code %d: %s", result.code, result.log)
 	}
-	e.untrackOrder(id)
-	// The chain accepted the cancel, so the order is finished and said so
-	// here. Waiting for the Indexer's removal instead would report it only
-	// when that update happens to arrive before the untrack above.
-	e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: godex.ReasonCanceledByRequest})
+	// The chain accepted the cancel, which is not the same as the order having
+	// ended by it: a cancel accepted the instant the order filled applies to
+	// nothing. The order stays tracked, and the Indexer reports how it
+	// actually ended.
 	return nil
 }
 
@@ -618,10 +646,32 @@ func (e *Executor) trackOrder(id godex.OrderID, ref orderRef) {
 func (e *Executor) untrackOrder(id godex.OrderID) {
 	e.stateMu.Lock()
 	defer e.stateMu.Unlock()
+	e.untrackOrderLocked(id)
+}
+
+func (e *Executor) untrackOrderLocked(id godex.OrderID) {
 	if ref, ok := e.orders[id]; ok {
 		delete(e.orderIDsByClientID, ref.clientID)
 	}
 	delete(e.orders, id)
+	delete(e.canceling, id)
+}
+
+// terminalReasonLocked names why an order ended. A cancel the caller asked for
+// and the chain accepted reads the same on every venue, so it wins over the
+// Indexer's own wording for the removal it caused — otherwise the reason would
+// depend on which of the two reports arrived first.
+func (e *Executor) terminalReasonLocked(id godex.OrderID, venueReason string) string {
+	if _, requested := e.canceling[id]; requested {
+		return godex.ReasonCanceledByRequest
+	}
+	return venueReason
+}
+
+func (e *Executor) clearCancelIntent(id godex.OrderID) {
+	e.stateMu.Lock()
+	delete(e.canceling, id)
+	e.stateMu.Unlock()
 }
 
 // --- transaction submission ---
@@ -957,10 +1007,11 @@ func (e *Executor) applyOrderUpdates(orders ordersResponse) {
 			continue
 		}
 		ref := e.orders[id]
-		delete(e.orders, id)
-		delete(e.orderIDsByClientID, clientID)
+		// Read before untracking, which clears the cancel intent.
+		reason := e.terminalReasonLocked(id, rejectionReason(update, ref))
+		e.untrackOrderLocked(id)
 		if removed {
-			e.send(godex.OrderRejectedEvent{OrderID: id, Reason: rejectionReason(update, ref)})
+			e.send(godex.OrderRejectedEvent{OrderID: id, Reason: reason})
 		}
 	}
 }

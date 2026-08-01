@@ -109,20 +109,32 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
   strategy that counted rejections, or treated one as a signal to re-quote,
   was acting on the same order twice; one that keyed off the order id was
   already immune.
-- **A cancel the venue confirms now reports the order finished, on every
-  adapter**, with the new `godex.ReasonCanceledByRequest`. The same race ran
-  the other way here: `CancelOrder` untracks on success and the account
-  stream's update is only emitted for an order still tracked, so the
-  `OrderRejectedEvent` for a caller's own cancel arrived only when the venue's
-  push beat the cancel response. Across three otherwise identical testnet
-  runs it appeared twice and went missing once. Lighter never emitted one at
-  all — its stream reports only post-only cancellations — so the three
-  adapters did not agree on what a cancel means. The event is now emitted by
-  `CancelOrder` itself, and the stream's later copy is absorbed by the
-  deduplication above. A cancel the venue reports as already moot — never
-  placed, already gone, past its expiry block — still emits nothing under this
-  reason: that order's fate is whatever retired it, which may be a fill, and
-  is reported by the path that observed it.
+- **An order that ends by a cancel the caller asked for now reports it, on
+  every adapter**, under the new `godex.ReasonCanceledByRequest`. The same
+  race ran the other way here: `CancelOrder` untracked on success and the
+  account stream's update was only emitted for an order still tracked, so the
+  `OrderRejectedEvent` arrived only when the venue's push beat the cancel
+  response. Across three otherwise identical testnet runs it appeared twice
+  and went missing once. Lighter never emitted one at all, so the three
+  adapters did not agree on what a cancel means.
+
+  `CancelOrder` no longer claims an outcome. It records the cancel before
+  dispatch and leaves the order tracked; whichever path observes the end
+  reports it, and the recorded intent — not which report arrived first — is
+  what the reason comes from. Accepting a cancel says the request was valid,
+  not that it applied: one accepted in the same instant the order filled
+  applied to nothing, and that order is now reported as filled rather than as
+  cancelled. A failed cancel withdraws the intent, so the order stays
+  addressable and the existing retry-after-timeout recovery is unchanged.
+- **Hyperliquid resolves an order the venue says it no longer holds.**
+  "never placed, already canceled, or filled" does not say which, and
+  untracking on it dropped the `orderUpdates` push that did — an order could
+  end with no event at all. The adapter now asks `orderStatus` outright and
+  reports what comes back, retiring a filled order without a rejection.
+- **Lighter retires an order once it is finished**, instead of remembering
+  every order it ever placed for the lifetime of the process. Its cancel of a
+  resting order is still not observable at all; the package comment now says
+  so rather than implying coverage.
 - **dYdX no longer publishes the unpriced position the stream reports after a
   fill.** In that moment the account stream reports the new size with an entry
   price of zero, and an unrealized PnL computed against that zero, correcting

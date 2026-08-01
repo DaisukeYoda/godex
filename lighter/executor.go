@@ -1,6 +1,20 @@
 // Package lighter implements godex.VenueExecutor for Lighter (zkLighter).
 // It signs LIMIT orders (post-only / IOC) with an on-chain-registered trading
 // API key via the official lighter-go SDK and submits them through sendTx.
+//
+// Known gap: a cancel the caller asks for produces no OrderRejectedEvent for a
+// resting order. sendTx accepting the transaction is receipt, not application
+// — this venue accepts and then rejects asynchronously — so the adapter waits
+// for the venue to say the order ended. The account stream reports only the
+// post-only cancellation status, and there is no order-status endpoint to ask
+// instead, so a plain cancellation is never observed. Such orders also stay
+// tracked, since nothing retires them.
+//
+// Closing it needs the venue's order-status vocabulary, which is not
+// documented here and must not be guessed at: mislabelling a status decides
+// whether a fill is suppressed. `cmd/godex-smoke -record` captures the raw
+// account frames a testnet session produces, which is how that vocabulary is
+// meant to be established.
 package lighter
 
 import (
@@ -69,8 +83,14 @@ type Executor struct {
 	hasMarginSnapshot      bool
 	accountInvalid         *accountInvalidObservation
 	orders                 map[godex.OrderID]int64 // OrderID -> client order index
-	clientOrderCounter     int64
-	authRefreshTimer       *time.Timer
+	// canceling holds orders whose cancel the venue accepted. Acceptance here
+	// is receipt of the transaction, not the order having ended by it — this
+	// venue rejects asynchronously — so the order stays tracked. Membership
+	// makes a second cancel unaddressable and labels the terminal event when
+	// the account stream reports one.
+	canceling          map[godex.OrderID]struct{}
+	clientOrderCounter int64
+	authRefreshTimer   *time.Timer
 
 	pollerWG sync.WaitGroup
 }
@@ -92,6 +112,7 @@ func New(cfg Config) (*Executor, error) {
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		orders:          make(map[godex.OrderID]int64),
+		canceling:       make(map[godex.OrderID]struct{}),
 		// Seeded from wall-clock ms so client order indexes stay unique
 		// across restarts without persistence.
 		clientOrderCounter: resolved.now().UnixMilli(),
@@ -444,25 +465,53 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 
 	e.stateMu.Lock()
 	clientOrderIndex, tracked := e.orders[id]
+	_, alreadyCanceling := e.canceling[id]
+	if tracked && !alreadyCanceling {
+		// Recorded before dispatch, not after the answer: the account stream
+		// can report the order gone while the cancel is still in flight, and
+		// the reason that report carries must not depend on which of the two
+		// lands first. An order being cancelled is also no longer
+		// addressable, so a second cancel has nothing to act on.
+		e.canceling[id] = struct{}{}
+	}
 	e.stateMu.Unlock()
-	if !tracked {
+	if !tracked || alreadyCanceling {
 		return fmt.Errorf("%w: %s", godex.ErrUnknownOrder, id)
 	}
+	// A cancel that did not take leaves the order addressable again, so the
+	// intent is withdrawn on every path that does not return success —
+	// including an unknown outcome, because cancel-by-client-index is
+	// idempotent and retrying it is how that fault recovers. The cost is that
+	// a cancel which did apply after an unknown outcome is reported under the
+	// venue's own wording; that is the honest answer, since the adapter never
+	// learned its cancel was the cause.
 	failure, err := e.submitSignedTx(ctx, func(nonce int64) (uint8, string, error) {
 		return e.signer.signCancelOrder(e.cfg.marketIndex, clientOrderIndex, nonce)
 	})
 	if err != nil {
+		e.clearCancelIntent(id)
 		return err
 	}
 	if failure != "" {
 		// Any nonce resync already happened inside submitSignedTx.
+		e.clearCancelIntent(id)
 		return fmt.Errorf("lighter: cancel failed: %s", failure)
 	}
-	// The venue accepted the cancel, so the order is finished and said so
-	// here. The account stream reports only post-only cancellations, so a
-	// caller-initiated one would otherwise go unreported entirely.
-	e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: godex.ReasonCanceledByRequest})
+	// sendTx accepting the transaction is not the order having ended by it:
+	// this venue accepts and then rejects asynchronously, so a cancel accepted
+	// the instant the order filled applies to nothing. The order stays
+	// tracked, and the account stream reports how it actually ended.
+	//
+	// The stream reports only post-only cancellations today, so a
+	// caller-initiated cancel of a resting order is not yet reported at all;
+	// see the package comment.
 	return nil
+}
+
+func (e *Executor) clearCancelIntent(id godex.OrderID) {
+	e.stateMu.Lock()
+	delete(e.canceling, id)
+	e.stateMu.Unlock()
 }
 
 func (e *Executor) allocateOrderID() (godex.OrderID, int64) {
@@ -481,8 +530,13 @@ func (e *Executor) trackOrder(id godex.OrderID, clientOrderIndex int64) {
 
 func (e *Executor) untrackOrder(id godex.OrderID) {
 	e.stateMu.Lock()
-	delete(e.orders, id)
+	e.untrackOrderLocked(id)
 	e.stateMu.Unlock()
+}
+
+func (e *Executor) untrackOrderLocked(id godex.OrderID) {
+	delete(e.orders, id)
+	delete(e.canceling, id)
 }
 
 // submitSignedTx serializes take-nonce → sign → sendTx under txMu so the
@@ -756,7 +810,7 @@ func (e *Executor) applyStateEvents(events []godex.AccountEvent, sequence int64)
 		e.lastStateObservation = sequence
 	}
 	for _, event := range events {
-		switch event.(type) {
+		switch typed := event.(type) {
 		case godex.PositionEvent:
 			if staleState {
 				continue
@@ -767,10 +821,30 @@ func (e *Executor) applyStateEvents(events []godex.AccountEvent, sequence int64)
 				continue
 			}
 			e.hasMarginSnapshot = true
+		case godex.OrderRejectedEvent:
+			// The order is finished, so it stops being tracked here rather
+			// than being remembered for the process's lifetime. A cancel the
+			// caller asked for is what the venue's own wording is replaced
+			// by, so the reason does not depend on which report arrived first.
+			event = godex.OrderRejectedEvent{
+				OrderID: typed.OrderID,
+				Reason:  e.terminalReasonLocked(typed.OrderID, typed.Reason),
+			}
+			e.untrackOrderLocked(typed.OrderID)
 		}
 		e.send(event)
 	}
 	return hasStateEvent && !staleState
+}
+
+// terminalReasonLocked names why an order ended. A cancel the caller asked for
+// and the venue accepted reads the same on every venue, so it wins over the
+// venue's own wording for the removal it caused.
+func (e *Executor) terminalReasonLocked(id godex.OrderID, venueReason string) string {
+	if _, requested := e.canceling[id]; requested {
+		return godex.ReasonCanceledByRequest
+	}
+	return venueReason
 }
 
 func (e *Executor) setAccountInvalid(err error, sequence int64) {
