@@ -13,13 +13,15 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
 ### Added
 
-- **`hyperliquid` adapter for Hyperliquid, not yet adopted.** It is implemented
-  with a full unit suite but has not been through the testnet adoption gate, so
-  it is not adopted under the rule above: no order has been placed through it
-  against a live venue. Orders are signed as L1 actions — the action is
-  MessagePack-encoded, framed with the nonce and vault address, hashed, and
-  signed as EIP-712 typed data under the venue's fixed `Exchange` domain — and
-  signing is pinned to the reference implementation's own published test
+- **`hyperliquid` adapter for Hyperliquid, adopted.** The full adoption-gate
+  scenario passes on testnet: connect and verified snapshot, far post-only and
+  cancel, a crossing post-only refused as `badAloPxRejected` on the normal path,
+  IOC fill and long position, a forced reconnect that reconverged on the open
+  position with no duplicate fills, and a reduce-only close back to flat.
+  Orders are signed as L1 actions — the action is MessagePack-encoded, framed
+  with the nonce and vault address, hashed, and signed as EIP-712 typed data
+  under the venue's fixed `Exchange` domain — and signing is additionally
+  pinned to the reference implementation's own published test
   vectors, including the MessagePack preimage on its own so an encoder change
   reports as an encoding fault rather than an unexplained signature mismatch.
   Post-only maps to the `Alo` time-in-force and a crossing maker is refused
@@ -93,6 +95,46 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
 ### Fixed
 
+- **An order's rejection is now reported at most once, on every adapter.** Two
+  paths observe the same outcome — the venue's answer to the submission and the
+  account stream's own order update — and nothing orders them against each
+  other. All three adapters relied on the submission path retiring the order
+  before the stream reached it, which held only as long as the stream lagged.
+  It does not on Hyperliquid: the testnet adoption run had the `orderUpdates`
+  push beat the HTTP response on every crossing post-only, so both paths
+  emitted and a caller saw one order rejected twice, under two different
+  reason strings. Rejections are now deduplicated by order id at the single
+  point every event passes through (`internal/dedupe`), which also absorbs the
+  order statuses Lighter's account snapshot replays after a reconnect. A
+  strategy that counted rejections, or treated one as a signal to re-quote,
+  was acting on the same order twice; one that keyed off the order id was
+  already immune.
+- **An order that ends by a cancel the caller asked for now reports it, on
+  every adapter**, under the new `godex.ReasonCanceledByRequest`. The same
+  race ran the other way here: `CancelOrder` untracked on success and the
+  account stream's update was only emitted for an order still tracked, so the
+  `OrderRejectedEvent` arrived only when the venue's push beat the cancel
+  response. Across three otherwise identical testnet runs it appeared twice
+  and went missing once. Lighter never emitted one at all, so the three
+  adapters did not agree on what a cancel means.
+
+  `CancelOrder` no longer claims an outcome. It records the cancel before
+  dispatch and leaves the order tracked; whichever path observes the end
+  reports it, and the recorded intent — not which report arrived first — is
+  what the reason comes from. Accepting a cancel says the request was valid,
+  not that it applied: one accepted in the same instant the order filled
+  applied to nothing, and that order is now reported as filled rather than as
+  cancelled. A failed cancel withdraws the intent, so the order stays
+  addressable and the existing retry-after-timeout recovery is unchanged.
+- **Hyperliquid resolves an order the venue says it no longer holds.**
+  "never placed, already canceled, or filled" does not say which, and
+  untracking on it dropped the `orderUpdates` push that did — an order could
+  end with no event at all. The adapter now asks `orderStatus` outright and
+  reports what comes back, retiring a filled order without a rejection.
+- **Lighter retires an order once it is finished**, instead of remembering
+  every order it ever placed for the lifetime of the process. Its cancel of a
+  resting order is still not observable at all; the package comment now says
+  so rather than implying coverage.
 - **dYdX no longer publishes the unpriced position the stream reports after a
   fill.** In that moment the account stream reports the new size with an entry
   price of zero, and an unrealized PnL computed against that zero, correcting

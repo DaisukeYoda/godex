@@ -662,6 +662,248 @@ func countFills(events []godex.AccountEvent) int {
 	return count
 }
 
+// A caller's cancel is reported when the venue says how the order actually
+// ended, not when the cancel is accepted — and it reads under the shared
+// reason regardless of which report arrives first.
+func TestCancelOrderIsReportedWhenTheStreamConfirmsIt(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	venue.queueExchange(scriptedExchange{
+		body: `{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}`,
+	})
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	// Accepting the cancel is not yet knowing how the order ended.
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("an accepted cancel reported an outcome %d times before the venue said one", count)
+	}
+	// The order is no longer addressable, even though it is still tracked.
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); !errors.Is(err, godex.ErrUnknownOrder) {
+		t.Errorf("second CancelOrder = %v, want ErrUnknownOrder", err)
+	}
+
+	venue.push(t, orderUpdateFrame(string(ack.OrderID), "canceled"))
+	event, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "rejection", isRejectionEvent)
+	if err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+	rejection := event.(godex.OrderRejectedEvent)
+	if rejection.OrderID != ack.OrderID || rejection.Reason != godex.ReasonCanceledByRequest {
+		t.Errorf("rejection = %+v, want %s under %q", rejection, ack.OrderID, godex.ReasonCanceledByRequest)
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
+	}
+}
+
+// The reverse ordering: the stream's update lands while the cancel is still in
+// flight. The reason must not change with it.
+func TestCancelOrderReasonSurvivesTheStreamWinningTheRace(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	base := venue.exchangeCount()
+	venue.queueExchange(scriptedExchange{
+		delay: 120 * time.Millisecond,
+		body:  `{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}`,
+	})
+
+	done := make(chan error, 1)
+	go func() { done <- executor.CancelOrder(t.Context(), ack.OrderID) }()
+	deadline := time.Now().Add(testEventTimeout)
+	for venue.exchangeCount() == base {
+		if time.Now().After(deadline) {
+			t.Fatal("the cancel action never reached the venue")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	venue.push(t, orderUpdateFrame(string(ack.OrderID), "canceled"))
+	if err := <-done; err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	event, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "rejection", isRejectionEvent)
+	if err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+	if reason := event.(godex.OrderRejectedEvent).Reason; reason != godex.ReasonCanceledByRequest {
+		t.Errorf("reason = %q, want %q — the reason must not depend on which report won",
+			reason, godex.ReasonCanceledByRequest)
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
+	}
+}
+
+// A cancel accepted the instant the order filled applied to nothing. The order
+// ended by executing, so it must not be reported as cancelled.
+func TestCancelOrderOfAnOrderThatFilledReportsNoRejection(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	venue.queueExchange(scriptedExchange{
+		body: `{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}`,
+	})
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	venue.push(t, orderUpdateFrame(string(ack.OrderID), "filled"))
+	venue.push(t, fillFrame(t, false, 991205))
+	if _, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "fill", isFillEvent); err != nil {
+		t.Fatalf("fill: %v", err)
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("a filled order was reported as cancelled %d times, want 0", count)
+	}
+}
+
+// "never placed, already canceled, or filled" does not say which. Untracking on
+// it would drop the update that does, so the venue is asked outright — and an
+// order it reports as closed is still reported to the caller.
+func TestCancelOrderOfAnAlreadyGoneOrderResolvesItsOutcome(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	venue.setOrderQuery(queryStatusOrder, "canceled")
+	venue.queueExchange(scriptedExchange{
+		body: `{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"error":` +
+			`"Order was never placed, already canceled, or filled. asset=4"}]}}}`,
+	})
+
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	event, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "rejection", isRejectionEvent)
+	if err != nil {
+		t.Fatalf("an order the venue no longer holds was never reported: %v", err)
+	}
+	if reason := event.(godex.OrderRejectedEvent).Reason; reason != "canceled" {
+		t.Errorf("reason = %q, want the venue's own answer", reason)
+	}
+}
+
+// The same response for an order that turns out to have filled: it ended by
+// executing, so there is nothing to reject.
+func TestCancelOrderOfAnAlreadyGoneOrderThatFilledReportsNothing(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	mark := collector.Mark()
+	venue.setOrderQuery(queryStatusOrder, orderStatusFilled)
+	venue.queueExchange(scriptedExchange{
+		body: `{"status":"ok","response":{"type":"cancel","data":{"statuses":[{"error":` +
+			`"Order was never placed, already canceled, or filled. asset=4"}]}}}`,
+	})
+
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("a filled order was reported as rejected %d times, want 0", count)
+	}
+	if err := executor.CancelOrder(t.Context(), ack.OrderID); !errors.Is(err, godex.ErrUnknownOrder) {
+		t.Errorf("a resolved order is still tracked: %v", err)
+	}
+}
+
+func countRejectionsFor(events []godex.AccountEvent, id godex.OrderID) int {
+	count := 0
+	for _, event := range events {
+		if rejection, ok := event.(godex.OrderRejectedEvent); ok && rejection.OrderID == id {
+			count++
+		}
+	}
+	return count
+}
+
+// A crossing post-only is reported twice by the venue: once as the answer to
+// the submission and once as an order update on the account stream. On
+// testnet the push routinely beats the HTTP response, so the order is still
+// tracked when the stream reports it and both paths reach send. The caller
+// must still see one rejection — the second is the same fact, and a strategy
+// counting rejections would otherwise double-count.
+func TestCrossingPostOnlyIsRejectedOnceWhenTheStreamWinsTheRace(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	mark := collector.Mark()
+
+	// The response is held back so the order update lands first — but by well
+	// under TxRequestTimeout, so this stays a race between two answers rather
+	// than becoming an ambiguous submission.
+	venue.queueExchange(scriptedExchange{
+		delay: 120 * time.Millisecond,
+		body: `{"status":"ok","response":{"type":"order","data":{"statuses":[{"error":` +
+			`"Post only order would have immediately matched, bbo was 2986.2"}]}}}`,
+	})
+
+	type placement struct {
+		ack godex.OrderAck
+		err error
+	}
+	placed := make(chan placement, 1)
+	go func() {
+		ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+		placed <- placement{ack: ack, err: err}
+	}()
+
+	// The action is recorded before the scripted delay, so the client order
+	// id the stream must echo is readable while the response is in flight.
+	deadline := time.Now().Add(testEventTimeout)
+	for venue.exchangeCount() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the order action never reached the venue")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	venue.push(t, orderUpdateFrame(venue.lastOrderWire(t).Cloid, "badAloPxRejected"))
+
+	result := <-placed
+	if result.err != nil {
+		t.Fatalf("PlaceOrder returned an error for a crossing post-only: %v", result.err)
+	}
+	if result.ack.Status != godex.AckRejected {
+		t.Fatalf("ack status = %s, want %s", result.ack.Status, godex.AckRejected)
+	}
+	if _, _, err := collector.WaitForAt(t.Context(), mark, testEventTimeout, "rejection",
+		isRejectionEvent); err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+	// Both paths have now run: the stream's update was consumed above and the
+	// submission has returned. Anything the losing path emitted is present.
+	if count := countRejectionsFor(collector.Events()[mark:], result.ack.OrderID); count != 1 {
+		t.Errorf("order was rejected %d times, want 1", count)
+	}
+}
+
 // --- regressions for the reconciliation and lifecycle gaps ---
 
 // An order left resting by an unknown outcome is one the caller cannot

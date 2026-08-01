@@ -982,6 +982,92 @@ func TestCancelOrderSignsTrackedOrder(t *testing.T) {
 	}
 }
 
+// A caller's cancel is reported when the Indexer says how the order actually
+// ended, not when the chain accepts the transaction — and it reads under the
+// shared reason regardless of which report arrives first.
+func TestCancelOrderIsReportedWhenTheIndexerConfirmsIt(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, fake, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	params := fake.lastPlace(t)
+	mark := collector.Mark()
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+	// Accepting the cancel is not yet knowing how the order ended.
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("an accepted cancel reported an outcome %d times before the Indexer said one", count)
+	}
+	// The order is no longer addressable, even though it is still tracked.
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); !errors.Is(err, godex.ErrUnknownOrder) {
+		t.Errorf("second CancelOrder = %v, want ErrUnknownOrder", err)
+	}
+
+	venue.push(orderFrame(t, params.clientID, "venue-order-1", orderStatusCanceled, nil))
+	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout, "rejection",
+		isRejectionFor(ack.OrderID))
+	if err != nil {
+		t.Fatalf("rejection: %v", err)
+	}
+	if reason := event.(godex.OrderRejectedEvent).Reason; reason != godex.ReasonCanceledByRequest {
+		t.Errorf("rejection reason = %q, want %q", reason, godex.ReasonCanceledByRequest)
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 1 {
+		t.Errorf("order was reported finished %d times, want 1", count)
+	}
+}
+
+// A cancel accepted the instant the order filled applied to nothing. The order
+// ended by executing, so it must not be reported as cancelled.
+func TestCancelOrderOfAnOrderThatFilledReportsNoRejection(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, fake, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+
+	ack, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	params := fake.lastPlace(t)
+	mark := collector.Mark()
+	if err := executor.CancelOrder(context.Background(), ack.OrderID); err != nil {
+		t.Fatalf("CancelOrder: %v", err)
+	}
+
+	venue.push(orderFrame(t, params.clientID, "venue-order-1", orderStatusFilled, nil))
+	deadline := time.Now().Add(testEventTimeout)
+	for {
+		executor.stateMu.Lock()
+		_, still := executor.orders[ack.OrderID]
+		executor.stateMu.Unlock()
+		if !still {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the filled order was never retired")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if count := countRejectionsFor(collector.Events()[mark:], ack.OrderID); count != 0 {
+		t.Errorf("a filled order was reported as cancelled %d times, want 0", count)
+	}
+}
+
+func countRejectionsFor(events []godex.AccountEvent, id godex.OrderID) int {
+	count := 0
+	for _, event := range events {
+		if rejected, ok := event.(godex.OrderRejectedEvent); ok && rejected.OrderID == id {
+			count++
+		}
+	}
+	return count
+}
+
 // TestCancelOrderAfterExpiryIsIdempotent: a short-term order past its expiry
 // block is already gone, so canceling it must succeed quietly instead of
 // failing against a venue that has forgotten it.

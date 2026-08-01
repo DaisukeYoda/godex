@@ -18,6 +18,7 @@ import (
 
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
+	"github.com/DaisukeYoda/godex/internal/dedupe"
 	"github.com/DaisukeYoda/godex/internal/ws"
 )
 
@@ -45,6 +46,7 @@ type Executor struct {
 	logger *slog.Logger
 
 	events          chan godex.AccountEvent
+	rejections      *dedupe.Set[godex.OrderID]
 	lifecycleCtx    context.Context
 	lifecycleCancel context.CancelFunc
 
@@ -81,7 +83,13 @@ type Executor struct {
 	accountInvalid       *accountInvalidObservation
 	orders               map[godex.OrderID]int64 // client order id -> venue oid (0 = not yet known)
 	ordersByOid          map[int64]godex.OrderID
-	fills                *fillCache
+	// canceling holds orders whose cancel the venue accepted. They stay
+	// tracked, because only the account stream (or reconciliation) can say
+	// how the order actually ended — a cancel accepted the instant the order
+	// filled applies to nothing. Membership is what makes a second cancel
+	// unaddressable and what labels the terminal event when it arrives.
+	canceling map[godex.OrderID]struct{}
+	fills     *fillCache
 	// connGeneration counts connections; connOpen tracks whether the current
 	// one is up. Account reads run off the socket, so a slow response can
 	// land after its connection dropped — the pair is what keeps those
@@ -116,10 +124,12 @@ func New(cfg Config) (*Executor, error) {
 		cfg:               resolved,
 		logger:            resolved.logger,
 		events:            make(chan godex.AccountEvent, godex.DefaultAccountEventBuffer),
+		rejections:        dedupe.NewSet[godex.OrderID](dedupe.RejectionCapacity),
 		lifecycleCtx:      lifecycleCtx,
 		lifecycleCancel:   lifecycleCancel,
 		orders:            make(map[godex.OrderID]int64),
 		ordersByOid:       make(map[int64]godex.OrderID),
+		canceling:         make(map[godex.OrderID]struct{}),
 		fills:             newFillCache(),
 		fillSnapshotReady: make(chan struct{}),
 	}, nil
@@ -486,8 +496,17 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 
 	e.stateMu.Lock()
 	_, tracked := e.orders[id]
+	_, alreadyCanceling := e.canceling[id]
+	if tracked && !alreadyCanceling {
+		// Recorded before dispatch, not after the answer: the account stream
+		// can report the order gone while the cancel is still in flight, and
+		// the reason that report carries must not depend on which of the two
+		// lands first. An order being cancelled is also no longer addressable,
+		// so a second cancel has nothing to act on.
+		e.canceling[id] = struct{}{}
+	}
 	e.stateMu.Unlock()
-	if !tracked {
+	if !tracked || alreadyCanceling {
 		return fmt.Errorf("%w: %s", godex.ErrUnknownOrder, id)
 	}
 
@@ -495,28 +514,86 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 		Type:    actionTypeCancelByCloid,
 		Cancels: []cancelByCloidWire{{Asset: e.asset.index, Cloid: string(id)}},
 	}
+	// A cancel that did not take leaves the order addressable again, so the
+	// intent is withdrawn on every path that does not return success —
+	// including an unknown outcome, because cancel-by-cloid is idempotent and
+	// retrying it is how that fault recovers. The cost is that a cancel which
+	// did apply after an unknown outcome is reported under the venue's own
+	// wording; that is the honest answer, since the adapter never learned its
+	// cancel was the cause.
 	statuses, failure, err := e.submitAction(ctx, action, id)
 	if err != nil {
+		e.clearCancelIntent(id)
 		return err
 	}
 	if failure != "" {
+		e.clearCancelIntent(id)
 		return fmt.Errorf("hyperliquid: cancel failed: %s", failure)
 	}
 	message, err := decodeCancelStatus(statuses)
 	if err != nil {
 		// The cancel may or may not have been applied; that is exactly the
 		// ambiguity the fault latch exists for.
+		e.clearCancelIntent(id)
 		return e.latchTxFault(err, id)
 	}
 	if message != "" {
 		if cancelAlreadyGonePattern.MatchString(message) {
-			e.untrackOrder(id)
+			// "never placed, already canceled, or filled" does not say which.
+			// Untracking on it would drop the orderUpdates push that does say,
+			// leaving an order that ended with no event at all, so the venue is
+			// asked outright.
+			e.resolveGoneOrder(ctx, id)
 			return nil
 		}
+		e.clearCancelIntent(id)
 		return fmt.Errorf("hyperliquid: cancel failed: %s", message)
 	}
-	e.untrackOrder(id)
+	// The venue accepted the cancel, which is not the same as the order having
+	// ended by it: a cancel accepted the instant the order filled applies to
+	// nothing. The order stays tracked, and the account stream reports how it
+	// actually ended.
 	return nil
+}
+
+func (e *Executor) clearCancelIntent(id godex.OrderID) {
+	e.stateMu.Lock()
+	delete(e.canceling, id)
+	e.stateMu.Unlock()
+}
+
+// resolveGoneOrder settles an order the venue says it no longer holds, so the
+// order is retired under the reason the venue gives rather than silently. An
+// order that turns out to have filled is retired without a rejection; one the
+// venue cannot classify stays tracked for the next reconciliation.
+func (e *Executor) resolveGoneOrder(ctx context.Context, id godex.OrderID) {
+	liveness, reason, err := e.queryOrderLiveness(ctx, id)
+	if err != nil {
+		e.logger.Warn("hyperliquid could not resolve a cancelled order's outcome; "+
+			"it stays tracked for reconciliation", "order_id", id, "error", err)
+		return
+	}
+	switch liveness {
+	case orderLive:
+		// The venue holds it after all; the cancel did not apply.
+		return
+	case orderLivenessUnclear:
+		return
+	case orderFilledOut:
+		e.untrackOrder(id)
+		return
+	}
+	// The venue had nothing to cancel, so the caller's cancel is not how this
+	// order ended and must not be what it is reported under. Whatever the
+	// venue says retired it is the truthful answer; untracking clears the
+	// intent along with the order.
+	e.stateMu.Lock()
+	_, still := e.orders[id]
+	e.untrackOrderLocked(id)
+	e.stateMu.Unlock()
+	if still {
+		e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: reason})
+	}
 }
 
 // submitAction serializes allocate-nonce → sign → POST under txMu so the
@@ -793,9 +870,11 @@ func (e *Executor) reconcileTrackedOrders(ctx context.Context) {
 		}
 		e.stateMu.Lock()
 		if _, still := e.orders[orderID]; still {
+			// Read before untracking, which clears the cancel intent.
+			terminalReason := e.terminalReasonLocked(orderID, reason)
 			e.untrackOrderLocked(orderID)
 			if liveness == orderClosed {
-				e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: reason})
+				e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: terminalReason})
 			}
 		}
 		e.stateMu.Unlock()
@@ -904,6 +983,18 @@ func (e *Executor) untrackOrderLocked(id godex.OrderID) {
 		}
 		delete(e.orders, id)
 	}
+	delete(e.canceling, id)
+}
+
+// terminalReasonLocked names why an order ended. A cancel the caller asked for
+// and the venue accepted reads the same on every venue, so it wins over the
+// venue's own wording for the removal it caused — otherwise the reason would
+// depend on which of the two reports arrived first.
+func (e *Executor) terminalReasonLocked(id godex.OrderID, venueReason string) string {
+	if _, requested := e.canceling[id]; requested {
+		return godex.ReasonCanceledByRequest
+	}
+	return venueReason
 }
 
 // decodeOrderStatus extracts the single per-order outcome an order action
@@ -1114,12 +1205,16 @@ func (e *Executor) handleOrderUpdates(data []byte) error {
 		case orderStatusOpen, orderStatusTriggered:
 			// Still live.
 		case orderStatusFilled:
+			// It filled, so a cancel accepted for it applied to nothing and
+			// must not be reported as having ended it.
 			e.untrackOrderLocked(orderID)
 		default:
 			// Every remaining status ends the order without filling it in
 			// full; validate() has already rejected anything unrecognized.
+			// The reason is read before untracking, which clears the intent.
+			reason := e.terminalReasonLocked(orderID, *update.Status)
 			e.untrackOrderLocked(orderID)
-			e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: *update.Status})
+			e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: reason})
 		}
 	}
 	return nil
@@ -1305,7 +1400,19 @@ func (e *Executor) accountPollLoop() {
 // attempt guarantees delivery whenever the buffer has room — in particular
 // the final DisconnectedEvent during Close, which runs with the lifecycle
 // context already canceled.
+//
+// One order's rejection is reported at most once. Two paths observe the same
+// outcome — the venue's answer to the submission and the account stream's
+// order update — and neither is ordered against the other, so the losing path
+// is dropped here rather than at each call site. The dropped copy carries no
+// news: OrderRejectedEvent means the order is finished, which is not a fact
+// that can arrive twice with different content.
 func (e *Executor) send(event godex.AccountEvent) {
+	if rejection, ok := event.(godex.OrderRejectedEvent); ok {
+		if !e.rejections.Observe(rejection.OrderID) {
+			return
+		}
+	}
 	select {
 	case e.events <- event:
 		return

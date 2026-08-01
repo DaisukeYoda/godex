@@ -11,10 +11,7 @@ exactly what a post-only maker / IOC taker strategy needs. See
 `docs/pre-implementation.md` for the design boundary and safety rules.
 
 **Status: pre-release.** All three adapters are implemented with full unit
-suites. Lighter and dYdX have passed the full testnet adoption-gate run;
-Hyperliquid has not yet, so treat it as unproven against a live venue until it
-does — its signing is pinned to the venue's own reference test vectors, but no
-order has been placed through it.
+suites, and all three have passed the full testnet adoption-gate run.
 
 ## Install
 
@@ -65,6 +62,14 @@ Design invariants every adapter upholds:
   their own after roughly fifteen blocks; the adapter reports that as an
   `OrderRejectedEvent` rather than letting a strategy believe a quote is
   still live.
+- **An order finishes exactly once.** Every end of an order — crossed,
+  expired, cancelled — is one `OrderRejectedEvent`, whichever path observed
+  it first. An order that ended by a cancel the caller asked for carries
+  `godex.ReasonCanceledByRequest` on every venue, and an adapter reports it
+  only once the venue says the order ended: accepting a cancel means the
+  request was valid, not that it applied, and one accepted as the order
+  filled applied to nothing. Lighter cannot observe a plain cancellation at
+  all — see its package comment.
 - **Money is fixed-point.** All prices/sizes use `decimal.Decimal` (big-int
   mantissa + scale, string-only construction, round half away from zero).
   No floats anywhere near order flow.
@@ -237,10 +242,6 @@ account WS frames to JSONL for fixture refresh (Lighter only).
   transfer.
 - Use testnet keys for the smoke test. `.env*` and `*.jsonl` are gitignored;
   never commit key material or account recordings.
-
-## Roadmap
-
-- Hyperliquid testnet adoption-gate run.
 
 ## Changelog
 
