@@ -9,7 +9,16 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
-## Unreleased
+## v0.3.0 — Hyperliquid adapter
+
+Adds `hyperliquid`, alongside `lighter` and `dydx`. All three adapters have now
+passed their adoption gates on testnet (Hyperliquid on 2026-08-01, ETH).
+
+Also settles what it means for an order to finish: an order's end is reported
+exactly once, and a cancel the caller asked for is reported when the venue says
+the order ended rather than when it accepts the request. Consumers that counted
+`OrderRejectedEvent`s, or that relied on a caller's cancel producing no event,
+will see different behaviour — see Fixed.
 
 ### Added
 
@@ -85,6 +94,14 @@ reconnect with convergence and no duplicate fills, reduce-only close to flat.
 - The single `MaintenanceMarginFraction` describes the strictest tier of a
   Hyperliquid perp's schedule, so risk logic sizing a small position against it
   is more conservative than the venue requires.
+- A cancel the caller asks for is not observable on Lighter. `sendTx` accepting
+  the transaction is receipt, not application — the venue rejects
+  asynchronously — and its account stream reports only the post-only
+  cancellation status, with no order-status endpoint to ask instead. So
+  cancelling a resting order there produces no `OrderRejectedEvent`, and the
+  order stays tracked. Closing this needs the venue's order-status vocabulary,
+  which must be established from a recording (`cmd/godex-smoke -record`) rather
+  than guessed at: mislabelling a status decides whether a fill is suppressed.
 - An unrecognized Hyperliquid order status aborts the connection instead of
   being guessed at. There is no safe default: treating a live order as closed
   makes a strategy requote over its own resting quote, and treating a closed one
