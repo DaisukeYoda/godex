@@ -1,18 +1,47 @@
-# godex
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/logo-dark.svg">
+    <img src="docs/assets/logo.svg" alt="godex" width="340">
+  </picture>
 
-Go trading integration layer for perpetual DEXes — Lighter (zkLighter),
-dYdX v4, and Hyperliquid. godex owns authenticated order placement,
-cancellation, account-state observation, and venue-specific signing behind a
-small, safety-oriented contract. Strategy and risk logic depend only on the
-normalized types and events; venue protocol details never leak out.
+  <p><strong>Go trading integration layer for perpetual DEXes</strong><br>
+  Lighter (zkLighter) · dYdX v4 · Hyperliquid</p>
+
+  <p>
+    <a href="https://github.com/DaisukeYoda/godex/actions/workflows/ci.yml"><img src="https://github.com/DaisukeYoda/godex/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://pkg.go.dev/github.com/DaisukeYoda/godex"><img src="https://pkg.go.dev/badge/github.com/DaisukeYoda/godex.svg" alt="Go Reference"></a>
+    <a href="https://github.com/DaisukeYoda/godex/tags"><img src="https://img.shields.io/github/v/tag/DaisukeYoda/godex?label=release&color=5A67D8" alt="Release"></a>
+    <a href="https://go.dev/"><img src="https://img.shields.io/badge/Go-1.24-00ADD8?logo=go&logoColor=white" alt="Go 1.24"></a>
+    <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-97CA00" alt="License: MIT"></a>
+  </p>
+
+  <p>
+    <a href="https://daisukeyoda.github.io/godex/">Documentation</a> ·
+    <a href="https://daisukeyoda.github.io/godex/getting-started/">Getting Started</a> ·
+    <a href="https://daisukeyoda.github.io/godex/concepts/contract/">The Venue Contract</a> ·
+    <a href="https://daisukeyoda.github.io/godex/concepts/market-data/">Market Data</a> ·
+    <a href="https://daisukeyoda.github.io/godex/guides/security/">Security</a>
+  </p>
+</div>
+
+---
+
+godex owns authenticated order placement, cancellation, account-state
+observation, and venue-specific signing behind a small, safety-oriented
+contract. Strategy and risk logic depend only on the normalized types and
+events; venue protocol details never leak out.
 
 This is **not** a generic exchange SDK. The contract intentionally supports
-exactly what a post-only maker / IOC taker strategy needs. See the
-[full documentation](https://daisukeyoda.github.io/godex/) for the contract
-reference, market data, and design notes.
+exactly what a post-only maker / IOC taker strategy needs.
 
 **Status: pre-release.** All three adapters are implemented with full unit
 suites, and all three have passed the full testnet adoption-gate run.
+
+| Venue | Execution | Market data | Adoption gate |
+| :--- | :---: | :---: | :---: |
+| **Lighter** (zkLighter) | ✅ | ✅ | ✅ passed |
+| **dYdX v4** | ✅ | ✅ | ✅ passed |
+| **Hyperliquid** | ✅ | — | ✅ passed |
 
 ## Install
 
@@ -299,10 +328,12 @@ account WS frames to JSONL for fixture refresh (Lighter only).
 - Use testnet keys for the smoke test. `.env*` and `*.jsonl` are gitignored;
   never commit key material or account recordings.
 
-## Changelog
+---
 
-See [CHANGELOG.md](CHANGELOG.md).
-
-## License
-
-MIT
+<div align="center">
+  <sub>
+    <a href="CHANGELOG.md">Changelog</a> ·
+    <a href="LICENSE">MIT License</a> ·
+    <a href="https://daisukeyoda.github.io/godex/">daisukeyoda.github.io/godex</a>
+  </sub>
+</div>

@@ -1,0 +1,21 @@
+<svg width="340" height="128" viewBox="0 0 340 128" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="godex">
+  <defs>
+    <linearGradient id="hex" x1="20" y1="110" x2="110" y2="20" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00ADD8"/>
+      <stop offset="1" stop-color="#5A67D8"/>
+    </linearGradient>
+  </defs>
+  <!-- hexagon badge -->
+  <path d="M64 10 L110.8 37 L110.8 91 L64 118 L17.2 91 L17.2 37 Z"
+        stroke="url(#hex)" stroke-width="6" stroke-linejoin="round"/>
+  <!-- order book: asks (right-aligned) over bids (left-aligned) -->
+  <rect x="58" y="38" width="30" height="8" rx="4" fill="#5A67D8"/>
+  <rect x="48" y="52" width="40" height="8" rx="4" fill="#5A67D8"/>
+  <rect x="40" y="68" width="40" height="8" rx="4" fill="#00ADD8"/>
+  <rect x="40" y="82" width="30" height="8" rx="4" fill="#00ADD8"/>
+  <!-- wordmark -->
+  <text x="140" y="85" font-family="ui-monospace, 'SFMono-Regular', 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace"
+        font-size="58" font-weight="700" letter-spacing="-1">
+    <tspan fill="#00ADD8">go</tspan><tspan fill="#1B1F24">dex</tspan>
+  </text>
+</svg>
