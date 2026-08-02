@@ -68,7 +68,12 @@ type Socket struct {
 	reconnectTimer *time.Timer
 	lifecycle      context.Context
 	cancel         context.CancelFunc
-	wg             sync.WaitGroup // read loops + watchdogs of all connections
+	// wg tracks read loops and watchdogs of all connections, plus in-flight
+	// reconnect dials. The dials matter: OnOpen runs on the reconnect
+	// goroutine, and Stop must not return while an OnOpen (which typically
+	// emits into an adapter's event channel) may still be running — the
+	// adapter closes that channel right after Stop.
+	wg sync.WaitGroup
 }
 
 // New builds a Socket. cfg must be validated by the caller; logger is
@@ -292,12 +297,19 @@ func (s *Socket) scheduleReconnect() {
 	s.delay = min(time.Duration(float64(s.delay)*s.cfg.Multiplier), s.cfg.MaxDelay)
 	lifecycle := s.lifecycle
 	s.reconnectTimer = time.AfterFunc(delay, func() {
+		// Register with wg under mu while running is still true, so Stop
+		// (which flips running under the same mutex before waiting) either
+		// sees this dial and waits for it — OnOpen included — or this
+		// callback sees the stop and never dials. wg.Add cannot race
+		// wg.Wait at counter zero this way.
 		s.mu.Lock()
-		running := s.running
-		s.mu.Unlock()
-		if !running {
+		if !s.running {
+			s.mu.Unlock()
 			return
 		}
+		s.wg.Add(1)
+		s.mu.Unlock()
+		defer s.wg.Done()
 		if err := s.dial(lifecycle); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return
