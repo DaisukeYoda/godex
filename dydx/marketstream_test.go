@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/DaisukeYoda/godex"
+	"github.com/DaisukeYoda/godex/internal/book"
 	"github.com/gorilla/websocket"
 )
 
@@ -345,6 +346,74 @@ func TestMarketStreamUncrossesDeltaDrivenCrossings(t *testing.T) {
 	wantAsks := [][2]string{{"128.5000", "40.000"}}
 	if got := askStrings(second); fmt.Sprint(got) != fmt.Sprint(wantAsks) {
 		t.Fatalf("asks after uncross = %v, want %v", got, wantAsks)
+	}
+}
+
+// Go addition: one channel_data frame carries both sides, and until this was
+// covered every delta test left asks empty.
+func TestMarketStreamAppliesBothSidesOfOneDelta(t *testing.T) {
+	venue := newFakeMarketVenue(t)
+	stream, collector := newTestMarketStream(t, venue, nil)
+	conn := syncMarketStream(t, venue, stream, collector)
+
+	// A new level on each side, neither crossing the other.
+	venue.push(t, conn, deltaFrame(2,
+		tupleLevel("128.4200", "4.000"),
+		tupleLevel("128.4600", "6.000")))
+	second := collector.waitBooks(t, 2)[1]
+
+	wantBids := [][2]string{
+		{"128.4300", "5.000"}, {"128.4200", "4.000"},
+		{"128.4100", "10.000"}, {"128.4000", "20.000"},
+	}
+	if got := bidStrings(second); fmt.Sprint(got) != fmt.Sprint(wantBids) {
+		t.Fatalf("bids after two-sided delta = %v, want %v", got, wantBids)
+	}
+	wantAsks := [][2]string{{"128.4400", "7.500"}, {"128.4600", "6.000"}, {"128.5000", "40.000"}}
+	if got := askStrings(second); fmt.Sprint(got) != fmt.Sprint(wantAsks) {
+		t.Fatalf("asks after two-sided delta = %v, want %v", got, wantAsks)
+	}
+}
+
+// Go addition: RemoveCrossedLevels deletes levels on the opposite side, so
+// within a delta that crosses, whichever side is applied last survives. The
+// side order must therefore be fixed — ranging a map here made the emitted top
+// of book vary between runs. Repeated because a random order would otherwise
+// only fail intermittently.
+func TestApplyDydxDeltaSideOrderIsDeterministic(t *testing.T) {
+	const runs = 64
+	var want string
+	for run := 0; run < runs; run++ {
+		builder := book.New(godex.VenueDydx, "SOL-PERP", "SOL-USD", 4, 3)
+		if err := builder.ApplySnapshot(
+			[]book.RawLevel{{Price: "128.4300", Size: "5.000"}},
+			[]book.RawLevel{{Price: "128.5000", Size: "40.000"}},
+		); err != nil {
+			t.Fatalf("ApplySnapshot: %v", err)
+		}
+		// Both sides land on the same price: the side applied last uncrosses
+		// the other, so the two orders leave entirely different books.
+		if err := applyDydxDelta(builder, &wsBookDelta{
+			Bids: [][]string{{"128.4500", "3.000"}},
+			Asks: [][]string{{"128.4500", "2.000"}},
+		}); err != nil {
+			t.Fatalf("applyDydxDelta: %v", err)
+		}
+		snapshot, err := builder.Snapshot(time.Time{})
+		if err != nil {
+			t.Fatalf("Snapshot: %v", err)
+		}
+		got := fmt.Sprint(bidStrings(snapshot), askStrings(snapshot))
+		if run == 0 {
+			want = got
+		} else if got != want {
+			t.Fatalf("book varies with delta side order: run %d got %s, first run %s", run, got, want)
+		}
+	}
+	// Bids first: the bid crosses nothing, then the later ask removes it.
+	const wantBidsFirst = "[[128.4300 5.000]] [[128.4500 2.000] [128.5000 40.000]]"
+	if want != wantBidsFirst {
+		t.Fatalf("book = %s, want %s (bids applied before asks)", want, wantBidsFirst)
 	}
 }
 

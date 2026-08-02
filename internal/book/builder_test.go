@@ -176,6 +176,34 @@ func TestApplyLevelZeroOnAbsentLevelIsNoop(t *testing.T) {
 	assertBook(t, b, syncedBids, syncedAsks)
 }
 
+// Go addition: a removal is not a way around the scale checks — a price the
+// builder would refuse to store is a broken scale assumption either way, and
+// accepting it as a silent no-op would hide it.
+func TestApplyLevelZeroValidatesPrice(t *testing.T) {
+	b := buildSynced(t)
+	for _, price := range []string{"63135.05", "0", "-63135", "not-a-price"} {
+		if _, err := b.ApplyLevel(Bids, price, "0"); err == nil {
+			t.Fatalf("ApplyLevel(%s, 0): expected an error", price)
+		}
+	}
+	assertBook(t, b, syncedBids, syncedAsks)
+}
+
+// Go addition: a rejected snapshot leaves the previous book untouched. The
+// sides used to be installed one at a time, so a failure on asks stranded the
+// book with new bids against old asks.
+func TestApplySnapshotRejectionLeavesBookUntouched(t *testing.T) {
+	b := buildSynced(t)
+	err := b.ApplySnapshot(
+		[]RawLevel{{Price: "63200", Size: "1"}},
+		[]RawLevel{{Price: "63300", Size: "0.123456"}}, // beyond sizeScale
+	)
+	if err == nil {
+		t.Fatal("expected an error for a size beyond scale")
+	}
+	assertBook(t, b, syncedBids, syncedAsks)
+}
+
 // TS: 「FailFast: 負の数量はConnectorError」
 func TestApplyLevelRejectsNegativeSize(t *testing.T) {
 	b := buildSynced(t)

@@ -203,6 +203,7 @@ func (s *MarketStream) handleOpen() error {
 	s.earlyMessageIDs = map[int64]struct{}{}
 	s.builder = nil
 	s.haveBook = false
+	s.lastMessageID = firstMessageID
 	s.awaitingSnapshot = false
 	s.consecutiveResyncs = 0
 	s.mu.Unlock()
@@ -337,15 +338,23 @@ func (s *MarketStream) handleDelta(message marketWsMessage) error {
 
 // applyDydxDelta interprets the [price, size] tuple delta representation,
 // uncrossing against later updates (the freshest state wins).
+//
+// The sides are applied bids-first in a fixed order, never by ranging a map:
+// RemoveCrossedLevels deletes levels on the opposite side, so within one delta
+// that crosses, whichever side is applied last survives. A varying order would
+// make the resulting top of book depend on it.
 func applyDydxDelta(builder *book.Builder, delta *wsBookDelta) error {
-	for side, tuples := range map[book.Side][][]string{book.Bids: delta.Bids, book.Asks: delta.Asks} {
-		for _, tuple := range tuples {
-			level, err := builder.ApplyLevel(side, tuple[0], tuple[1])
+	for _, entry := range []struct {
+		side   book.Side
+		tuples [][]string
+	}{{book.Bids, delta.Bids}, {book.Asks, delta.Asks}} {
+		for _, tuple := range entry.tuples {
+			level, err := builder.ApplyLevel(entry.side, tuple[0], tuple[1])
 			if err != nil {
 				return err
 			}
 			if level != nil {
-				builder.RemoveCrossedLevels(side, level.Price)
+				builder.RemoveCrossedLevels(entry.side, level.Price)
 			}
 		}
 	}

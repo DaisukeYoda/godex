@@ -69,8 +69,11 @@ func New(venueID godex.VenueID, symbol godex.Symbol, venueSymbol string, priceSc
 }
 
 // ApplySnapshot replaces the whole book. A duplicate price within one side is
-// a protocol violation.
+// a protocol violation. A rejected snapshot leaves the previous book
+// untouched: both sides are built before either is installed, so the caller's
+// recovery sees the state it had.
 func (b *Builder) ApplySnapshot(bids, asks []RawLevel) error {
+	built := map[Side]map[string]godex.BookLevel{}
 	for _, entry := range []struct {
 		side Side
 		raw  []RawLevel
@@ -88,8 +91,9 @@ func (b *Builder) ApplySnapshot(bids, asks []RawLevel) error {
 			}
 			levels[entry.Price] = level
 		}
-		b.levels[side] = levels
+		built[side] = levels
 	}
+	b.levels = built
 	return nil
 }
 
@@ -105,6 +109,12 @@ func (b *Builder) ApplyLevel(side Side, price, size string) (*godex.BookLevel, e
 		return nil, fmt.Errorf("%s: %s %s size must not be negative", b.venueID, b.venueSymbol, side)
 	}
 	if parsedSize.IsZero() {
+		// Validate the price even though the level is only being removed: a
+		// price the builder would refuse to store is a broken scale assumption
+		// either way, and silently accepting it as a no-op would hide it.
+		if _, err := b.toPrice(price); err != nil {
+			return nil, err
+		}
 		delete(b.levels[side], price)
 		return nil, nil
 	}
@@ -160,17 +170,27 @@ func (b *Builder) Snapshot(receivedAt time.Time) (godex.OrderBook, error) {
 	}, nil
 }
 
-func (b *Builder) toLevel(price, size string) (godex.BookLevel, error) {
-	parsedPrice, err := decimal.FromString(price, b.priceScale)
+// toPrice converts a wire price to the configured scale. A price outside the
+// scale or not strictly positive is a protocol violation.
+func (b *Builder) toPrice(price string) (decimal.Decimal, error) {
+	parsed, err := decimal.FromString(price, b.priceScale)
 	if err != nil {
-		return godex.BookLevel{}, fmt.Errorf("%s: %s price: %w", b.venueID, b.venueSymbol, err)
+		return decimal.Decimal{}, fmt.Errorf("%s: %s price: %w", b.venueID, b.venueSymbol, err)
+	}
+	if parsed.Sign() <= 0 {
+		return decimal.Decimal{}, fmt.Errorf("%s: %s price must be positive", b.venueID, b.venueSymbol)
+	}
+	return parsed, nil
+}
+
+func (b *Builder) toLevel(price, size string) (godex.BookLevel, error) {
+	parsedPrice, err := b.toPrice(price)
+	if err != nil {
+		return godex.BookLevel{}, err
 	}
 	parsedSize, err := decimal.FromString(size, b.sizeScale)
 	if err != nil {
 		return godex.BookLevel{}, fmt.Errorf("%s: %s size: %w", b.venueID, b.venueSymbol, err)
-	}
-	if parsedPrice.Sign() <= 0 {
-		return godex.BookLevel{}, fmt.Errorf("%s: %s price must be positive", b.venueID, b.venueSymbol)
 	}
 	if parsedSize.Sign() <= 0 {
 		return godex.BookLevel{}, fmt.Errorf("%s: %s size must be positive", b.venueID, b.venueSymbol)
