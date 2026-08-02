@@ -109,6 +109,30 @@ const (
 	removalReasonIndexerExpired = "ORDER_REMOVAL_REASON_INDEXER_EXPIRED"
 )
 
+// Market data.
+const (
+	// orderbookChannel is the Indexer's public order-book channel.
+	orderbookChannel = "v4_orderbook"
+	// fundingIntervalHours: dYdX v4 funding is an hourly rate
+	// (perpetualMarkets.nextFundingRate).
+	fundingIntervalHours = 1
+	// firstMessageID: message_id starts at 0 (the connected message) and is
+	// numbered per connection.
+	firstMessageID = 0
+	// messageReorderTolerance is the out-of-order buffer for message_id.
+	// The Indexer numbers without gaps or duplicates, but arrival order can
+	// swap across channels (observed: 4 swaps of adjacent ids in 7727
+	// messages). Only an id that stays unfilled beyond this many early
+	// arrivals is a true gap.
+	messageReorderTolerance = 100
+	// maxConsecutiveResyncs bounds per-market resubscribes
+	// (unsubscribe→subscribe). Immediate resubscribing in a loop trips the
+	// Indexer's subscribe rate limit ("Too many subscribe attempts ...
+	// Please reconnect and try again"); past the bound the whole connection
+	// is rebuilt, and reconnect backoff paces the retries naturally.
+	maxConsecutiveResyncs = 3
+)
+
 // Indexer WebSocket protocol.
 const (
 	subaccountsChannel = "v4_subaccounts"

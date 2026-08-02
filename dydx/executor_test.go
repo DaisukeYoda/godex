@@ -501,6 +501,33 @@ func mustConnect(t *testing.T, executor *Executor) godex.ExecutionMetadata {
 	return metadata
 }
 
+// markAfterConnectSnapshot waits for the events Connect's own snapshot
+// produces and returns a mark past them.
+//
+// Connect returns once the snapshot has been read, but the position and margin
+// events it produces are emitted on the stream goroutine afterwards. A test
+// that marks immediately and then waits for a position can match the
+// connect-time one instead of the position its own push produced — the mark
+// simply has not reached it yet. It loses only when the goroutine is
+// descheduled in that window, so it fails on a busy CI runner and never
+// locally.
+func markAfterConnectSnapshot(t *testing.T, collector *smoketest.Collector) int {
+	t.Helper()
+	ctx := context.Background()
+	for _, want := range []struct {
+		label     string
+		predicate func(godex.AccountEvent) bool
+	}{
+		{"connect position snapshot", isPositionEvent},
+		{"connect margin snapshot", isMarginEvent},
+	} {
+		if _, err := collector.WaitFor(ctx, 0, testEventTimeout, want.label, want.predicate); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return collector.Mark()
+}
+
 func testOrder(intent godex.OrderIntent) godex.NewOrder {
 	return godex.NewOrder{
 		Symbol: testSymbol,
@@ -1682,11 +1709,13 @@ func TestZeroEntryPriceIsRereadNotEmitted(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, collector := newTestExecutor(t, venue)
 	mustConnect(t, executor)
+	// Settle the connect-time snapshot first: its own REST read must not be the
+	// one that observes the state staged below.
+	mark := markAfterConnectSnapshot(t, collector)
 
 	// What the re-read finds: the position the venue settles on.
 	venue.setSubaccount(subaccountWithPosition(t, "0.002", "1954.9", "-0.028215654"))
 
-	mark := collector.Mark()
 	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
 
 	// The first position after the transient is the one that matters: had the
@@ -1717,12 +1746,14 @@ func TestZeroEntryPriceSurvivingIntoTheSnapshotIsRereadAgain(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, collector := newTestExecutor(t, venue)
 	mustConnect(t, executor)
+	// Settle the connect-time snapshot first: its own REST read must not consume
+	// one of the responses queued below.
+	mark := markAfterConnectSnapshot(t, collector)
 
 	// The first re-read still carries the transient; the second has settled.
 	venue.setSubaccount(subaccountWithPosition(t, "0.002", "1954.9", "-0.028215654"))
 	venue.queueSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
 
-	mark := collector.Mark()
 	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
 
 	event, err := collector.WaitFor(context.Background(), mark, testEventTimeout,
@@ -1747,10 +1778,12 @@ func TestZeroEntryPriceThatIsRealIsStillPublished(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, collector := newTestExecutor(t, venue)
 	mustConnect(t, executor)
+	// Settle the connect-time snapshot first, so its REST reads are not counted
+	// against the bound asserted below.
+	mark := markAfterConnectSnapshot(t, collector)
 
 	venue.setSubaccount(subaccountWithPosition(t, "0.002", "0", "3.881584346"))
 
-	mark := collector.Mark()
 	before := venue.subaccountReadCount()
 	venue.push(positionFrame(t, "0.002", "0", "3.881584346"))
 

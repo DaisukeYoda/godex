@@ -77,6 +77,10 @@ type options struct {
 	waitFill       bool
 	reconnectCheck bool
 	recordPath     string
+	marketWatch    bool
+	priceScale     int
+	sizeScale      int
+	watchDuration  time.Duration
 }
 
 func main() {
@@ -94,6 +98,9 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if opts.marketWatch {
+		return runMarketWatch(ctx, opts)
+	}
 	switch opts.venue {
 	case venueLighter:
 		return runLighter(ctx, opts)
@@ -119,8 +126,44 @@ func parseFlags(args []string) (options, error) {
 	waitFill := flags.Bool("wait-fill", false, "also wait for a natural near-touch maker fill")
 	reconnectCheck := flags.Bool("reconnect-check", false, "force a reconnect mid-scenario and verify convergence")
 	record := flags.String("record", "", "record raw account WS frames to this JSONL path")
+	marketWatch := flags.Bool("market-watch", false,
+		"watch public market data (book stream + funding polls) instead of running the execution smoke test; read-only, no credentials")
+	priceScale := flags.Int("price-scale", -1, "book price decimal scale (required with -market-watch; e.g. 4 for dYdX SOL-USD)")
+	sizeScale := flags.Int("size-scale", -1, "book size decimal scale (required with -market-watch; e.g. 3 for dYdX SOL-USD)")
+	watchDuration := flags.Duration("watch-duration", 0, "how long -market-watch runs (0 = until interrupted)")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err
+	}
+	if *marketWatch {
+		if *venue == "" || *network == "" || *symbol == "" {
+			return options{}, fmt.Errorf("missing required flags: -venue, -network, -symbol are required with -market-watch")
+		}
+		if *priceScale < 0 || *sizeScale < 0 {
+			return options{}, fmt.Errorf("-price-scale and -size-scale are required with -market-watch")
+		}
+		switch *venue {
+		case venueLighter:
+			if *marketID < 0 {
+				return options{}, fmt.Errorf("-market-id is required for -venue %s", venueLighter)
+			}
+		case venueDydx:
+			if *ticker == "" {
+				return options{}, fmt.Errorf("-ticker is required for -venue %s", venueDydx)
+			}
+		default:
+			return options{}, fmt.Errorf("-market-watch supports venues %s and %s", venueLighter, venueDydx)
+		}
+		return options{
+			venue:         *venue,
+			network:       *network,
+			marketID:      *marketID,
+			ticker:        *ticker,
+			symbol:        *symbol,
+			marketWatch:   true,
+			priceScale:    *priceScale,
+			sizeScale:     *sizeScale,
+			watchDuration: *watchDuration,
+		}, nil
 	}
 	if *venue == "" || *network == "" || *symbol == "" || *size == "" {
 		return options{}, fmt.Errorf("missing required flags: -venue, -network, -symbol, -size are all required")

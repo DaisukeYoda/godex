@@ -288,3 +288,46 @@ func TestStartTwiceFails(t *testing.T) {
 		t.Fatalf("Stop: %v", err)
 	}
 }
+
+// The server greets immediately after the handshake — before any subscribe,
+// as dYdX's connected frame does. Adapters initialize connection-scoped state
+// in OnOpen, so no message may be delivered before OnOpen returns; otherwise
+// the greeting races the hook (for the dydx market stream, consuming
+// message_id 0 before the watermark reset corrupted sequence tracking into a
+// spurious reconnect cycle).
+func TestOnMessageWaitsForOnOpen(t *testing.T) {
+	url := newTestServer(t, func(conn *websocket.Conn, _ int) {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("greeting"))
+		serveEcho(conn)
+	})
+	openStarted := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	rec := newRecorder()
+	handlers := rec.handlers()
+	handlers.OnOpen = func() error {
+		close(openStarted)
+		<-releaseOpen
+		return nil
+	}
+	sock := New("test", url, testReconnectConfig(), slog.Default(), handlers)
+
+	// Start blocks in OnOpen now, so drive it from a goroutine.
+	started := make(chan error, 1)
+	go func() { started <- sock.Start(context.Background()) }()
+	waitSignal(t, openStarted, "OnOpen started")
+	// While OnOpen is blocked, the greeting must not be delivered.
+	select {
+	case got := <-rec.messages:
+		t.Fatalf("message %q delivered before OnOpen completed", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseOpen)
+	if err := <-started; err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The buffered greeting is delivered once the read loop runs.
+	waitMessage(t, rec.messages, "greeting")
+	if err := sock.Stop(); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}

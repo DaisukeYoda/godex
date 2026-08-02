@@ -1,0 +1,9 @@
+{
+  "code": 200,
+  "order_book_details": [
+    {"market_id": 45, "last_trade_price": 0.0123, "daily_quote_token_volume": 123456.789, "open_interest": 1000000},
+    {"market_id": 1, "last_trade_price": 62000.2, "daily_quote_token_volume": 719934279.906264, "open_interest": 1700.5},
+    {"market_id": 0, "last_trade_price": 1644.39, "daily_quote_token_volume": 350632845.422212, "open_interest": 35000},
+    {"market_id": 2, "last_trade_price": 65.5, "daily_quote_token_volume": 51074544.2189, "open_interest": 120000}
+  ]
+}

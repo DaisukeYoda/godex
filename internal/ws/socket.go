@@ -34,8 +34,10 @@ const controlWriteTimeout = 5 * time.Second
 // Handlers are the adapter-side hooks. All hooks are required.
 type Handlers struct {
 	// OnOpen runs after every successful open, including reconnects; use it
-	// to (re)subscribe. An error is treated as loss of this connection: the
-	// socket aborts into the reconnect path (the process stays up).
+	// to (re)subscribe. It runs before the read loop starts, so no inbound
+	// message is processed until OnOpen returns. An error is treated as loss
+	// of this connection: the socket aborts into the reconnect path (the
+	// process stays up).
 	OnOpen func() error
 	// OnMessage receives each inbound message. An error (protocol violation,
 	// venue error notice) marks the connection unreliable: all subscriptions
@@ -68,7 +70,12 @@ type Socket struct {
 	reconnectTimer *time.Timer
 	lifecycle      context.Context
 	cancel         context.CancelFunc
-	wg             sync.WaitGroup // read loops + watchdogs of all connections
+	// wg tracks read loops and watchdogs of all connections, plus in-flight
+	// reconnect dials. The dials matter: OnOpen runs on the reconnect
+	// goroutine, and Stop must not return while an OnOpen (which typically
+	// emits into an adapter's event channel) may still be running — the
+	// adapter closes that channel right after Stop.
+	wg sync.WaitGroup
 }
 
 // New builds a Socket. cfg must be validated by the caller; logger is
@@ -205,16 +212,23 @@ func (s *Socket) dial(ctx context.Context) error {
 	s.delay = s.cfg.InitialDelay // reset backoff on success
 	s.mu.Unlock()
 
-	s.wg.Add(2)
-	go s.watchdog(conn, watchdogStop)
-	go s.readLoop(conn, watchdogStop)
-
+	// OnOpen runs before the read loop starts: adapters initialize
+	// connection-scoped state (sequence tracking, subscription bookkeeping)
+	// in the open hook, and no inbound frame may be processed before that
+	// state exists. A frame the server sends right after the handshake —
+	// before any subscribe — would otherwise race the hook.
 	if err := s.handlers.OnOpen(); err != nil {
 		// Subscribing right after open failed: treat as loss of this
-		// connection (the process stays up, the venue stays isolated).
+		// connection (the process stays up, the venue stays isolated). The
+		// read loop below dies on the closed connection and drives the
+		// reconnect path as before.
 		s.logger.Error("ws open handling failed — reconnecting", "label", s.label, "error", err)
 		_ = conn.Close()
 	}
+
+	s.wg.Add(2)
+	go s.watchdog(conn, watchdogStop)
+	go s.readLoop(conn, watchdogStop)
 	return nil
 }
 
@@ -292,12 +306,19 @@ func (s *Socket) scheduleReconnect() {
 	s.delay = min(time.Duration(float64(s.delay)*s.cfg.Multiplier), s.cfg.MaxDelay)
 	lifecycle := s.lifecycle
 	s.reconnectTimer = time.AfterFunc(delay, func() {
+		// Register with wg under mu while running is still true, so Stop
+		// (which flips running under the same mutex before waiting) either
+		// sees this dial and waits for it — OnOpen included — or this
+		// callback sees the stop and never dials. wg.Add cannot race
+		// wg.Wait at counter zero this way.
 		s.mu.Lock()
-		running := s.running
-		s.mu.Unlock()
-		if !running {
+		if !s.running {
+			s.mu.Unlock()
 			return
 		}
+		s.wg.Add(1)
+		s.mu.Unlock()
+		defer s.wg.Done()
 		if err := s.dial(lifecycle); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return

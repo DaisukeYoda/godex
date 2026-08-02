@@ -9,6 +9,85 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
+## v0.4.0 — Market data layer
+
+Adds the public, read-only half a maker/taker strategy consumes: normalized
+order-book streams and funding/statistics polls for Lighter and dYdX, behind
+two new root contracts — `MarketStream` (WS) and `MarketDataClient` (REST).
+Like executors, one stream or client serves one market, and neither touches
+credentials.
+
+### Added
+
+- **`godex.MarketStream` and `godex.MarketDataClient` contracts**, with
+  `FundingRate`, `MarketStats`, `OrderBook`/`BookLevel`, and the sealed
+  `MarketEvent` union (`BookSnapshotEvent`, `MarketConnectedEvent`,
+  `MarketDisconnectedEvent`). The event channel follows the account-stream
+  rules: buffered (`DefaultMarketEventBuffer`), blocking when full, closed
+  only after `Close`. Unlike executors, a stream keeps itself alive across
+  connection drops between `Start` and `Close`. New scales:
+  `FundingRateScale` (8) and `USDNotionalScale` (2).
+- **`dydx.NewMarketStream`** — the Indexer's `v4_orderbook` channel. Sequence
+  integrity is proven through a contiguous `message_id` watermark that
+  tolerates cross-channel reordering (observed live: adjacent swaps) but
+  aborts on true gaps and duplicates. The Indexer publishes crossed books in
+  normal operation; delta-driven crossings are uncrossed by treating the
+  later update as the freshest state (the official client's interpretation),
+  a crossed snapshot resubscribes just that market on the same connection,
+  and past three consecutive resyncs the connection is rebuilt instead —
+  matching the venue's own subscribe-rate-limit guidance.
+- **`lighter.NewMarketStream`** — the public `order_book/{market_id}`
+  channel. Updates must chain `begin_nonce` → `nonce` exactly (the venue's
+  continuity proof); a mismatch rebuilds the connection, since the venue
+  offers no per-market resubscribe. A crossed book — impossible under an
+  intact nonce chain — suppresses emits while waiting for natural
+  resolution and rebuilds the connection past a short grace.
+- **`dydx.NewMarketData` / `lighter.NewMarketData`** — funding and market
+  statistics over REST. Funding rates normalize to a plain per-interval
+  decimal at `FundingRateScale` with each venue's quoting folded in: dYdX's
+  unpredictable native precision is rounded explicitly, Lighter's
+  percent-per-hour quote is divided down and its `direction` field folded
+  into the sign (long pays = positive). Open interest reported in base-asset
+  units converts to USD with the venue's own reference price, rounding once
+  at the product.
+- **`dydx.LoadExecutionMetadata` / `lighter.LoadExecutionMetadata`** — the
+  market's execution metadata (size step, maintenance margin fraction) over
+  public REST, without credentials. For consumers that pair real market data
+  with a simulated executor (dry runs): the simulation quantizes exactly like
+  the live executor would.
+- **`dydx.FetchFundingPayments`** — the Indexer's per-account settled funding
+  history (public REST). Unlike the account snapshot's `netFunding` (a
+  per-position running total that resets on close), payments arrive one per
+  funding interval, so any window can be aggregated.
+- **`dydx.KeyFromMnemonic`** — derives the account key at the Cosmos HD path
+  `m/44'/118'/0'/0/0` exactly as the official clients do, returning
+  Credentials-ready private key hex plus the bech32 address. Pinned in tests
+  against `@dydxprotocol/v4-client-js` reference derivations; mnemonics are
+  checksum-validated (a mistyped mnemonic must fail here, not later as an
+  on-chain authorization error). New dependency: `tyler-smith/go-bip39`.
+- **`decimal.Abs` / `decimal.Neg`.**
+- **`godex-smoke -market-watch`** — watches live public market data (book
+  stream, funding, statistics) without touching execution; the market-data
+  adoption check. Verified against both mainnets on 2026-08-01 (SOL).
+
+### Fixed
+
+- **`Close` no longer races an in-flight reconnect's `OnOpen`.** The shared
+  socket's `Stop` waited for read loops and watchdogs but not for a reconnect
+  dial still running its open hook; that hook emits the connected event, so a
+  `Close` in that window could send on a closed events channel and panic.
+  Reconnect dials are now tracked and waited for. The window also existed for
+  every executor's `Close`.
+- **`OnOpen` now runs before any inbound frame is read.** The shared socket
+  started its read loop before running the open hook, so a frame the venue
+  sends right after the handshake — before any subscribe, as dYdX's
+  `connected` frame does — could be processed before the adapter initialized
+  its connection-scoped state. For the dYdX market stream that meant the
+  greeting consuming `message_id` 0 ahead of the watermark reset, corrupting
+  sequence tracking into a spurious reconnect cycle. Executors were
+  unaffected (their open hook holds no state message handling depends on).
+  The open hook now completes before the read loop starts.
+
 ## v0.3.0 — Hyperliquid adapter
 
 Adds `hyperliquid`, alongside `lighter` and `dydx`. All three adapters have now
