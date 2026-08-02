@@ -4,3 +4,6 @@
 
 # Smoke-test recordings may contain account data.
 *.jsonl
+
+# MkDocs build output.
+site/

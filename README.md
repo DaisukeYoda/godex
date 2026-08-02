@@ -7,8 +7,9 @@ small, safety-oriented contract. Strategy and risk logic depend only on the
 normalized types and events; venue protocol details never leak out.
 
 This is **not** a generic exchange SDK. The contract intentionally supports
-exactly what a post-only maker / IOC taker strategy needs. See
-`docs/pre-implementation.md` for the design boundary and safety rules.
+exactly what a post-only maker / IOC taker strategy needs. See the
+[full documentation](https://daisukeyoda.github.io/godex/) for the contract
+reference, market data, and design notes.
 
 **Status: pre-release.** All three adapters are implemented with full unit
 suites, and all three have passed the full testnet adoption-gate run.

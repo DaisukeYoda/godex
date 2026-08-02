@@ -1,6 +1,11 @@
-# godex: Pre-Implementation Notes
+# Pre-Implementation Notes
 
 Date: 2026-07-22
+
+!!! note "Historical record"
+    This note predates the shipped implementation. Current invariants are
+    documented on the [Venue Contract](../concepts/contract.md) and
+    [Market Data](../concepts/market-data.md) pages.
 
 ## Goal
 
