@@ -128,8 +128,8 @@ func parseFlags(args []string) (options, error) {
 	record := flags.String("record", "", "record raw account WS frames to this JSONL path")
 	marketWatch := flags.Bool("market-watch", false,
 		"watch public market data (book stream + funding polls) instead of running the execution smoke test; read-only, no credentials")
-	priceScale := flags.Int("price-scale", -1, "book price decimal scale (required with -market-watch; e.g. SOL = 3)")
-	sizeScale := flags.Int("size-scale", -1, "book size decimal scale (required with -market-watch; e.g. SOL = 3)")
+	priceScale := flags.Int("price-scale", -1, "book price decimal scale (required with -market-watch; e.g. 4 for dYdX SOL-USD)")
+	sizeScale := flags.Int("size-scale", -1, "book size decimal scale (required with -market-watch; e.g. 3 for dYdX SOL-USD)")
 	watchDuration := flags.Duration("watch-duration", 0, "how long -market-watch runs (0 = until interrupted)")
 	if err := flags.Parse(args); err != nil {
 		return options{}, err

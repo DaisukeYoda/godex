@@ -30,7 +30,11 @@ type FundingRate struct {
 	VenueID VenueID
 	Symbol  Symbol
 	// Rate is the funding rate per interval at FundingRateScale, signed the
-	// way perp venues quote it: positive means longs pay shorts.
+	// way perp venues quote it: positive means longs pay shorts. What
+	// "current" means is the venue's own observation — dYdX reports the
+	// predicted rate for the upcoming interval, Lighter the latest settled
+	// one — so cross-venue comparisons must account for the different
+	// observation points (see the adapters' FundingRate docs).
 	Rate decimal.Decimal
 	// IntervalHours is the venue's funding interval (1 for hourly venues).
 	IntervalHours int
@@ -111,10 +115,9 @@ func (MarketDisconnectedEvent) isMarketEvent() {}
 //   - Snapshot/delta reassembly is internal; consumers always receive full
 //     snapshots.
 //
-// Unlike VenueExecutor.Close, a MarketStream keeps itself alive across
-// connection drops between Start and Close: drops emit
-// MarketDisconnectedEvent, reconnects emit MarketConnectedEvent and
-// resubscribe.
+// Between Start and Close a MarketStream keeps itself alive across
+// connection drops: drops emit MarketDisconnectedEvent, reconnects emit
+// MarketConnectedEvent and resubscribe.
 //
 // Event ordering contract (Events):
 //   - MarketConnectedEvent and MarketDisconnectedEvent alternate, including
