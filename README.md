@@ -49,116 +49,6 @@ suites, and all three have passed the full testnet adoption-gate run.
 go get github.com/DaisukeYoda/godex
 ```
 
-## The contract
-
-```go
-type VenueExecutor interface {
-    VenueID() VenueID
-    Connect(ctx context.Context) (ExecutionMetadata, error)
-    PlaceOrder(ctx context.Context, order NewOrder) (OrderAck, error)
-    CancelOrder(ctx context.Context, id OrderID) error
-    AccountEvents() <-chan AccountEvent
-    Close() error
-}
-```
-
-Design invariants every adapter upholds:
-
-- **Maker orders are post-only.** A taker-crossing rejection is a normal-path
-  outcome: PlaceOrder returns `AckRejected` (plus an `OrderRejectedEvent`),
-  never an error.
-- **Fills come only from the authenticated account stream.** Adapters never
-  infer executions or positions from order-book state.
-- **Strict wire validation.** Unexpected REST/WS payload shapes abort the
-  connection instead of being guessed at; reconnection re-subscribes and
-  re-converges from a verified snapshot.
-- **Ambiguous submissions halt, never retry blindly.** When an outcome is
-  unknown (e.g. timeout), the adapter latches a fault: the transaction is
-  never resent, later submissions fail with `ErrTxOutcomeUnknown`, and the
-  adapter reconciles with venue state before resuming.
-- **Event ordering.** `ConnectedEvent`/`DisconnectedEvent` alternate
-  (including across internal reconnects); all other events are emitted only
-  in between. The events channel is buffered; when full, the adapter blocks
-  rather than drops — consume promptly. The channel closes only after
-  `Close`.
-- **Quantization follows the venue's own rule.** Hyperliquid prices are not a
-  fixed tick: they carry at most five significant figures *and* at most
-  `6 - szDecimals` decimals, so the increment is recomputed per order from the
-  price's magnitude.
-- **Risk metadata errs toward the account.** Where a venue's maintenance margin
-  varies with position size, the single normalized fraction reports the
-  strictest requirement, never the most permissive.
-- **Venue lifetimes are made explicit.** dYdX short-term orders expire on
-  their own after roughly fifteen blocks; the adapter reports that as an
-  `OrderRejectedEvent` rather than letting a strategy believe a quote is
-  still live.
-- **An order finishes exactly once.** Every end of an order — crossed,
-  expired, cancelled — is one `OrderRejectedEvent`, whichever path observed
-  it first. An order that ended by a cancel the caller asked for carries
-  `godex.ReasonCanceledByRequest` on every venue, and an adapter reports it
-  only once the venue says the order ended: accepting a cancel means the
-  request was valid, not that it applied, and one accepted as the order
-  filled applied to nothing. Lighter cannot observe a plain cancellation at
-  all — see its package comment.
-- **Money is fixed-point.** All prices/sizes use `decimal.Decimal` (big-int
-  mantissa + scale, string-only construction, round half away from zero).
-  No floats anywhere near order flow.
-
-## Market data (public, read-only)
-
-Alongside execution, godex normalizes the public market data a maker/taker
-strategy consumes — order books and funding — behind two contracts, one
-streamed and one polled:
-
-```go
-type MarketStream interface {          // WS order-book stream
-    VenueID() VenueID
-    Start(ctx context.Context) error
-    Events() <-chan MarketEvent        // BookSnapshot | MarketConnected | MarketDisconnected
-    Close() error
-}
-
-type MarketDataClient interface {      // REST polls
-    VenueID() VenueID
-    FundingRate(ctx context.Context) (FundingRate, error)
-    MarketStats(ctx context.Context) (MarketStats, error)
-}
-```
-
-Like executors, one stream or client serves one market. Both are available for
-Lighter (`lighter.NewMarketStream` / `lighter.NewMarketData`) and dYdX
-(`dydx.NewMarketStream` / `dydx.NewMarketData`); they need no credentials.
-
-Invariants:
-
-- **A crossed book is never emitted.** Delta-driven crossings on dYdX are
-  uncrossed by treating the later update as the freshest state (the official
-  client's interpretation); a crossed snapshot resubscribes the market, and on
-  Lighter a crossed book suppresses emits and rebuilds the connection past a
-  short grace.
-- **Sequence integrity is proven, not assumed.** dYdX `message_id` is tracked
-  through a contiguous watermark that tolerates cross-channel reordering but
-  aborts on true gaps and duplicates; Lighter updates must chain
-  `begin_nonce` → `nonce` exactly. Either failure rebuilds the connection and
-  the book — no gap is ever papered over.
-- **Snapshot/delta reassembly is internal.** Consumers always receive full,
-  sorted book snapshots.
-- **Funding rates are normalized** to a plain per-interval decimal at
-  `FundingRateScale` with the venue's sign convention folded in (positive =
-  longs pay shorts), so rates from different venues subtract cleanly.
-
-dYdX also exposes `dydx.FetchFundingPayments` (the Indexer's per-account
-settled funding history, public REST) and `dydx.KeyFromMnemonic`, which
-derives the account key at the Cosmos HD path `m/44'/118'/0'/0/0` exactly as
-the official clients do — pinned in tests against `@dydxprotocol/v4-client-js`.
-
-To watch live market data without touching execution:
-
-```sh
-go run ./cmd/godex-smoke -market-watch -venue dydx -network mainnet \
-  -ticker SOL-USD -symbol SOL-PERP -price-scale 4 -size-scale 3 -watch-duration 30s
-```
-
 ## Quickstart (Lighter, testnet)
 
 ```go
@@ -282,6 +172,116 @@ replayed.
 Maintenance margin on Hyperliquid is tiered — a perp advertising 25x drops to 5x
 above $50k of notional — so `MaintenanceMarginFraction`, which is a single
 ratio, carries the strictest tier rather than the headline one.
+
+## The contract
+
+```go
+type VenueExecutor interface {
+    VenueID() VenueID
+    Connect(ctx context.Context) (ExecutionMetadata, error)
+    PlaceOrder(ctx context.Context, order NewOrder) (OrderAck, error)
+    CancelOrder(ctx context.Context, id OrderID) error
+    AccountEvents() <-chan AccountEvent
+    Close() error
+}
+```
+
+Design invariants every adapter upholds:
+
+- **Maker orders are post-only.** A taker-crossing rejection is a normal-path
+  outcome: PlaceOrder returns `AckRejected` (plus an `OrderRejectedEvent`),
+  never an error.
+- **Fills come only from the authenticated account stream.** Adapters never
+  infer executions or positions from order-book state.
+- **Strict wire validation.** Unexpected REST/WS payload shapes abort the
+  connection instead of being guessed at; reconnection re-subscribes and
+  re-converges from a verified snapshot.
+- **Ambiguous submissions halt, never retry blindly.** When an outcome is
+  unknown (e.g. timeout), the adapter latches a fault: the transaction is
+  never resent, later submissions fail with `ErrTxOutcomeUnknown`, and the
+  adapter reconciles with venue state before resuming.
+- **Event ordering.** `ConnectedEvent`/`DisconnectedEvent` alternate
+  (including across internal reconnects); all other events are emitted only
+  in between. The events channel is buffered; when full, the adapter blocks
+  rather than drops — consume promptly. The channel closes only after
+  `Close`.
+- **Quantization follows the venue's own rule.** Hyperliquid prices are not a
+  fixed tick: they carry at most five significant figures *and* at most
+  `6 - szDecimals` decimals, so the increment is recomputed per order from the
+  price's magnitude.
+- **Risk metadata errs toward the account.** Where a venue's maintenance margin
+  varies with position size, the single normalized fraction reports the
+  strictest requirement, never the most permissive.
+- **Venue lifetimes are made explicit.** dYdX short-term orders expire on
+  their own after roughly fifteen blocks; the adapter reports that as an
+  `OrderRejectedEvent` rather than letting a strategy believe a quote is
+  still live.
+- **An order finishes exactly once.** Every end of an order — crossed,
+  expired, cancelled — is one `OrderRejectedEvent`, whichever path observed
+  it first. An order that ended by a cancel the caller asked for carries
+  `godex.ReasonCanceledByRequest` on every venue, and an adapter reports it
+  only once the venue says the order ended: accepting a cancel means the
+  request was valid, not that it applied, and one accepted as the order
+  filled applied to nothing. Lighter cannot observe a plain cancellation at
+  all — see its package comment.
+- **Money is fixed-point.** All prices/sizes use `decimal.Decimal` (big-int
+  mantissa + scale, string-only construction, round half away from zero).
+  No floats anywhere near order flow.
+
+## Market data (public, read-only)
+
+Alongside execution, godex normalizes the public market data a maker/taker
+strategy consumes — order books and funding — behind two contracts, one
+streamed and one polled:
+
+```go
+type MarketStream interface {          // WS order-book stream
+    VenueID() VenueID
+    Start(ctx context.Context) error
+    Events() <-chan MarketEvent        // BookSnapshot | MarketConnected | MarketDisconnected
+    Close() error
+}
+
+type MarketDataClient interface {      // REST polls
+    VenueID() VenueID
+    FundingRate(ctx context.Context) (FundingRate, error)
+    MarketStats(ctx context.Context) (MarketStats, error)
+}
+```
+
+Like executors, one stream or client serves one market. Both are available for
+Lighter (`lighter.NewMarketStream` / `lighter.NewMarketData`) and dYdX
+(`dydx.NewMarketStream` / `dydx.NewMarketData`); they need no credentials.
+
+Invariants:
+
+- **A crossed book is never emitted.** Delta-driven crossings on dYdX are
+  uncrossed by treating the later update as the freshest state (the official
+  client's interpretation); a crossed snapshot resubscribes the market, and on
+  Lighter a crossed book suppresses emits and rebuilds the connection past a
+  short grace.
+- **Sequence integrity is proven, not assumed.** dYdX `message_id` is tracked
+  through a contiguous watermark that tolerates cross-channel reordering but
+  aborts on true gaps and duplicates; Lighter updates must chain
+  `begin_nonce` → `nonce` exactly. Either failure rebuilds the connection and
+  the book — no gap is ever papered over.
+- **Snapshot/delta reassembly is internal.** Consumers always receive full,
+  sorted book snapshots.
+- **Funding rates are normalized** to a plain per-interval decimal at
+  `FundingRateScale` with the venue's sign convention folded in (positive =
+  longs pay shorts), so rates from different venues subtract cleanly.
+
+dYdX also exposes `dydx.FetchFundingPayments` (the Indexer's per-account
+settled funding history, public REST) and `dydx.KeyFromMnemonic`, which
+derives the account key at the Cosmos HD path `m/44'/118'/0'/0/0` exactly as
+the official clients do — pinned in tests against `@dydxprotocol/v4-client-js`.
+
+To watch live market data without touching execution:
+
+```sh
+go run ./cmd/godex-smoke -market-watch -venue dydx -network mainnet \
+  -ticker SOL-USD -symbol SOL-PERP -price-scale 4 -size-scale 3 -watch-duration 30s
+```
 
 ## Testnet smoke test (adoption gates)
 
