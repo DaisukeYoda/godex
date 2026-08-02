@@ -1,0 +1,64 @@
+site_name: godex
+site_description: Go trading integration layer for perpetual DEXes
+site_url: https://daisukeyoda.github.io/godex/
+repo_url: https://github.com/DaisukeYoda/godex
+repo_name: DaisukeYoda/godex
+
+theme:
+  name: material
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.code.annotate
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.details
+  - pymdownx.snippets:
+      base_path: ['.']
+      check_paths: true
+
+plugins:
+  - search
+  - i18n:
+      docs_structure: suffix
+      languages:
+        - locale: en
+          default: true
+          name: English
+          build: true
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Concepts:
+      - The Venue Contract: concepts/contract.md
+      - Market Data: concepts/market-data.md
+  - Guides:
+      - Testnet Smoke Testing: guides/smoke-testing.md
+      - Security: guides/security.md
+  - Design Notes: design/pre-implementation.md
+  - Changelog: changelog.md
