@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/changelog/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/changelog/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/getting-started/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/getting-started/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/concepts/contract/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/concepts/contract/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/concepts/market-data/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/concepts/market-data/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/design/pre-implementation/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/design/pre-implementation/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/guides/security/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/guides/security/"/>
+    </url>
+    <url>
+        <loc>https://daisukeyoda.github.io/godex/guides/smoke-testing/</loc>
+        <lastmod>2026-08-02</lastmod>
+        <changefreq>daily</changefreq>
+        <xhtml:link rel="alternate" hreflang="en" href="https://daisukeyoda.github.io/godex/guides/smoke-testing/"/>
+    </url>
+</urlset>
