@@ -273,6 +273,16 @@ func (d Decimal) Scale() int {
 	return d.scale
 }
 
+// Abs returns the absolute value of d at the same scale.
+func (d Decimal) Abs() Decimal {
+	return Decimal{mantissa: new(big.Int).Abs(d.mant()), scale: d.scale}
+}
+
+// Neg returns -d at the same scale.
+func (d Decimal) Neg() Decimal {
+	return Decimal{mantissa: new(big.Int).Neg(d.mant()), scale: d.scale}
+}
+
 // IsZero reports whether d equals zero at any scale.
 func (d Decimal) IsZero() bool {
 	return d.mant().Sign() == 0
