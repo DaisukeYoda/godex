@@ -1,0 +1,7 @@
+{
+  "code": 200,
+  "fundings": [
+    {"timestamp": 1781190000, "rate": "0.0099", "direction": "long"},
+    {"timestamp": 1781193600, "rate": "0.0008", "direction": "long"}
+  ]
+}

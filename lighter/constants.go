@@ -102,3 +102,26 @@ const (
 	pingMessage = `{"type":"ping"}`
 	pongMessage = `{"type":"pong"}`
 )
+
+// Market data.
+const (
+	// Funding applies hourly at the top of the hour
+	// (docs.lighter.xyz/trading/funding).
+	fundingIntervalHours = 1
+	fundingResolution    = "1h"
+	// The /fundings endpoint requires both start and end; look back two hours
+	// so the window always contains at least one settled hourly funding.
+	fundingLookback  = 2 * time.Hour
+	fundingCountBack = 1
+	// Funding direction values: the side that pays. "long" folds into a
+	// positive rate (longs pay shorts).
+	fundingDirectionLong  = "long"
+	fundingDirectionShort = "short"
+
+	// defaultCrossedBookGrace is how long a crossed book suppresses emits
+	// before the connection is rebuilt. Nonce continuity should make crossing
+	// impossible; this is defense in depth, and there is no official
+	// per-market resubscribe to reach for instead. Kept short so consumers'
+	// staleness thresholds see the outage quickly.
+	defaultCrossedBookGrace = 1 * time.Second
+)
