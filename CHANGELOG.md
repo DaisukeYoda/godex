@@ -78,6 +78,15 @@ credentials.
   `Close` in that window could send on a closed events channel and panic.
   Reconnect dials are now tracked and waited for. The window also existed for
   every executor's `Close`.
+- **`OnOpen` now runs before any inbound frame is read.** The shared socket
+  started its read loop before running the open hook, so a frame the venue
+  sends right after the handshake — before any subscribe, as dYdX's
+  `connected` frame does — could be processed before the adapter initialized
+  its connection-scoped state. For the dYdX market stream that meant the
+  greeting consuming `message_id` 0 ahead of the watermark reset, corrupting
+  sequence tracking into a spurious reconnect cycle. Executors were
+  unaffected (their open hook holds no state message handling depends on).
+  The open hook now completes before the read loop starts.
 
 ## v0.3.0 — Hyperliquid adapter
 
