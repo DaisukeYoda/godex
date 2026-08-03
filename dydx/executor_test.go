@@ -480,6 +480,13 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *recordingSigne
 		t.Fatalf("New: %v", err)
 	}
 	collector := smoketest.NewCollector(t.Logf)
+	// Registered before the close cleanup so it runs after it (cleanups are
+	// LIFO): the stream is complete only once the channel has been drained.
+	t.Cleanup(func() {
+		if err := smoketest.CheckContract(collector.Events()); err != nil {
+			t.Errorf("AccountEvents contract: %v", err)
+		}
+	})
 	consumed := make(chan struct{})
 	go func() {
 		collector.Consume(executor.AccountEvents())
