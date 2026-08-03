@@ -121,3 +121,26 @@ termination, not left implicit.
     This eliminates an entire class of rounding and representation bugs
     from price and size arithmetic; any conversion at the boundary of the
     library must go through `decimal`, never through a native float.
+
+## How the contract is verified
+
+The clauses above are not only prose. `internal/conformance` holds one test
+per shared clause, and every adapter runs the same suite against its own fake
+venue, under the same clause names:
+
+```
+go test ./lighter/ ./dydx/ ./hyperliquid/ -run TestConformance -v
+```
+
+An adapter supplies only a small harness — a connected executor, the order to
+place, and the handful of things a clause needs to make its venue act (force a
+reconnect, report an order ended, report an execution). A clause that does not
+run there is declared with its reason, and the reason says which kind it is:
+
+- `VENUE:` a limitation of the venue itself, which no adapter work would
+  remove. Lighter's account stream reports only post-only cancellations and it
+  has no order-status query, so two clauses genuinely cannot be driven there.
+- `GAP:` unfinished work in the adapter, which is a bug.
+
+Skips are printed by `go test -v`, so the venues a clause does *not* hold for
+are readable off a test run rather than inferred from an absent test.

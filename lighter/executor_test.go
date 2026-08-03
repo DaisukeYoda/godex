@@ -168,6 +168,16 @@ func (f *fakeSigner) check() error                              { return nil }
 
 func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *fakeSigner, *smoketest.Collector) {
 	t.Helper()
+	executor, signerFake, collector, _ := newTestExecutorStream(t, venue)
+	return executor, signerFake, collector
+}
+
+// newTestExecutorStream is newTestExecutor, also reporting when the account
+// event channel has closed and the collector therefore holds the whole stream.
+// Close returning is not that moment; the conformance suite needs the one that
+// is.
+func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *fakeSigner, *smoketest.Collector, <-chan struct{}) {
+	t.Helper()
 	signerFake := &fakeSigner{}
 	executor, err := New(Config{
 		Credentials: Credentials{AccountIndex: testAccountIndex, APIKeyIndex: 2, APIPrivateKey: "ab"},
@@ -208,7 +218,7 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *fakeSigner, *s
 		_ = executor.Close()
 		<-consumed
 	})
-	return executor, signerFake, collector
+	return executor, signerFake, collector, consumed
 }
 
 func mustConnect(t *testing.T, executor *Executor) godex.ExecutionMetadata {

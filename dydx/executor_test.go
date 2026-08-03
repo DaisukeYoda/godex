@@ -450,6 +450,16 @@ func (s *recordingSigner) lastPlace(t *testing.T) placeOrderParams {
 
 func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *recordingSigner, *smoketest.Collector) {
 	t.Helper()
+	executor, fake, collector, _ := newTestExecutorStream(t, venue)
+	return executor, fake, collector
+}
+
+// newTestExecutorStream is newTestExecutor, also reporting when the account
+// event channel has closed and the collector therefore holds the whole stream.
+// Close returning is not that moment; the conformance suite needs the one that
+// is.
+func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *recordingSigner, *smoketest.Collector, <-chan struct{}) {
+	t.Helper()
 	fake := &recordingSigner{addr: testAddress}
 	executor, err := New(Config{
 		Credentials: Credentials{
@@ -497,7 +507,7 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *recordingSigne
 		_ = executor.Close()
 		<-consumed
 	})
-	return executor, fake, collector
+	return executor, fake, collector, consumed
 }
 
 func mustConnect(t *testing.T, executor *Executor) godex.ExecutionMetadata {
