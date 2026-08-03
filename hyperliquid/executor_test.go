@@ -638,14 +638,9 @@ func fillFrame(t *testing.T, isSnapshot bool, tradeIDs ...int64) []byte {
 	t.Helper()
 	fills := make([]string, 0, len(tradeIDs))
 	for _, tradeID := range tradeIDs {
-		// Stamp each trade with its own time. A FillEvent carries no venue
-		// trade ID, so two executions that agree on order, side, price, size
-		// and time are indistinguishable downstream — including to
-		// smoketest.CheckContract's duplicate check. Distinct trades here must
-		// look distinct.
 		fills = append(fills, fmt.Sprintf(`{"coin":"ETH","px":"2986.3","sz":"0.5","side":"B",`+
-			`"time":%d,"oid":77738308,"tid":%d,"fee":"0.0447",`+
-			`"cloid":"0x0000000000000000000000000000abcd"}`, 1753660000000+tradeID, tradeID))
+			`"time":1753660000000,"oid":77738308,"tid":%d,"fee":"0.0447",`+
+			`"cloid":"0x0000000000000000000000000000abcd"}`, tradeID))
 	}
 	return fmt.Appendf(nil, `{"channel":"userFills","data":{"isSnapshot":%t,"user":%q,"fills":[%s]}}`,
 		isSnapshot, testAccount, strings.Join(fills, ","))
