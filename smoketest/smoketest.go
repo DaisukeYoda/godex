@@ -253,9 +253,11 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 		pass("natural maker fill cycle")
 	}
 
-	// Stream-wide contract checks.
+	// Stream-wide contract checks. The executor is still running, so this is
+	// the ordering clause only — the final DisconnectedEvent Close owes the
+	// stream has not been emitted yet.
 	events := collector.Events()
-	if err := checkConnectionAlternation(events); err != nil {
+	if err := CheckContract(events); err != nil {
 		return err
 	}
 	pass("connected/disconnected alternation")
@@ -405,34 +407,20 @@ func isPositionWithSign(sign int) func(godex.AccountEvent) bool {
 	}
 }
 
-// checkConnectionAlternation verifies the AccountEvents ordering contract:
-// connected/disconnected alternate and every other event sits inside a
-// connected window.
-func checkConnectionAlternation(events []godex.AccountEvent) error {
-	connected := false
-	for i, event := range events {
-		switch event.(type) {
-		case godex.ConnectedEvent:
-			if connected {
-				return fmt.Errorf("smoketest: event %d: connected while already connected", i)
-			}
-			connected = true
-		case godex.DisconnectedEvent:
-			if !connected {
-				return fmt.Errorf("smoketest: event %d: disconnected while not connected", i)
-			}
-			connected = false
-		default:
-			if !connected {
-				return fmt.Errorf("smoketest: event %d (%s) emitted outside a connected window", i, FormatEvent(event))
-			}
-		}
-	}
-	return nil
-}
-
-// checkNoDuplicateFills verifies no fill was delivered twice (the reconnect
-// path must not re-emit executions).
+// checkNoDuplicateFills reports a fill that repeats an earlier one exactly —
+// the reconnect path re-emitting an execution the caller already saw.
+//
+// It is a heuristic, and deliberately not part of CheckContract. A FillEvent
+// carries no venue trade ID, so two distinct executions that agree on order,
+// side, price, size and time are indistinguishable here, and a venue may
+// legitimately produce them: one order filling in equal slices against the
+// same resting level within a single timestamp tick. What makes the heuristic
+// worth running is the scenario around it — Run works one small order at a
+// time, so an exact repeat really is a replay, and its verdict is read by a
+// person qualifying an adapter rather than by CI.
+//
+// At-most-once delivery itself is enforced by each adapter against the venue's
+// own fill identifier, which is the only sound key, and is tested there.
 func checkNoDuplicateFills(events []godex.AccountEvent) error {
 	seen := make(map[string]int)
 	for i, event := range events {
