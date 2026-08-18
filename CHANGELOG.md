@@ -9,6 +9,56 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
+## Unreleased — TxFlow adapter
+
+Adds a fourth executor, for TxFlow's perp DEX (`txflow`), and factors the
+signing primitives it shares with Hyperliquid into `internal/evmsign`. The
+adapter runs the full unit and shared conformance suites against a fake
+venue but is **not yet adopted**: TxFlow's platform API is undocumented as
+of this release and its testnet endpoints are unknown, so every protocol
+detail the adapter could only assume from the venue's web client — the
+cancel action shape, the signing preimage omitting the action type, the
+exchange response envelope, the resting-order status string — is marked
+`UNVERIFIED` in `txflow/constants.go` and `txflow/wire.go`.
+
+### Added
+
+- **`txflow.New`** — a `godex.VenueExecutor` for TxFlow. The venue's API
+  descends from Hyperliquid's (`/info`, `/exchange`, MessagePack action
+  hash signed as an EIP-712 `Agent`), with differences the adapter absorbs:
+  markets resolve through `perpMeta` by an explicit asset index and decimal
+  steps (`basePrecision`, `priceTick`); per-market queries are keyed by
+  that index; the info endpoint allowlists its query types (no `meta`,
+  `orderStatus`, `extraAgents`, or fills stream); the WebSocket subscribe
+  envelope names the channel beside the method; and the EIP-712 domain and
+  `Agent` struct carry the network name, chain id and API version.
+- **Fills by polling.** The venue streams no executions, so the executor
+  polls the `userFills` query (`FillPollInterval`, default 2s), seeds the
+  account's history at Connect without publishing it, deduplicates by trade
+  id, and attributes fills to orders by venue oid — including after the
+  order has ended, through a bounded oid index. A filled order update and a
+  reconnect wake the poll ahead of its tick.
+- **Orders keyed by venue oid.** The venue's client sends no client order
+  id and whether the venue accepts one is unverified, so cancels use the
+  oid the placing response returned. An order update that arrives before
+  the placing response is held and applied when the oid is bound. An
+  ambiguous submission — no oid — is recovered by matching the account's
+  `historicalOrders` on the market against the submission time: exactly
+  one candidate is claimed and cancelled, none clears the fault, several
+  keep it latched (nothing is guessed).
+- **`Config.MaintenanceMarginFraction`** (required). The venue documents
+  tiered, per-market maintenance rates but exposes them through no query
+  the adapter has found; the caller supplies the strictest tier.
+- **`txflow.Testnet`** fails to resolve until `RESTBaseURL`, `WSURL` and
+  `Signing` overrides are supplied — no placeholder endpoints.
+- **`internal/evmsign`** — keccak, EIP-712 domain/digest helpers, the
+  MessagePack action hash, minimal-form hex, address derivation and the
+  secp256k1 `KeySigner`, shared by `hyperliquid` and `txflow`. Hyperliquid's
+  reference signing vectors pass unchanged over the extraction.
+- **`godex.VenueTxFlow`**, and `cmd/godex-smoke -venue txflow` with
+  `-market`, `-maintenance-margin-fraction`, `TXFLOW_ACCOUNT_ADDRESS` and
+  `TXFLOW_API_PRIVATE_KEY`.
+
 ## v0.4.0 — Market data layer
 
 Adds the public, read-only half a maker/taker strategy consumes: normalized

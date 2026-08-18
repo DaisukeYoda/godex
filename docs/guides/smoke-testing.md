@@ -57,6 +57,20 @@ Run the scenario with `cmd/godex-smoke`, one command per venue.
       -coin ETH -symbol ETH-PERP -size 0.010 -reconnect-check
     ```
 
+=== "TxFlow"
+
+    ```sh
+    TXFLOW_ACCOUNT_ADDRESS=0x... TXFLOW_API_PRIVATE_KEY=0x... \
+      go run ./cmd/godex-smoke -venue txflow -network mainnet \
+      -market ETH-USDC -maintenance-margin-fraction 0.025 \
+      -symbol ETH-PERP -size 0.010 -reconnect-check
+    ```
+
+    TxFlow's testnet endpoints are not yet known, so only `-network mainnet`
+    resolves — run with a small size on a dedicated account. The market's
+    strictest maintenance-margin tier is passed explicitly because the venue
+    exposes no schedule the adapter can read.
+
 !!! note "Logging and exit status"
     Each gate logs `PASS` or `FAIL` as it completes; any failure exits the
     process non-zero, so the run is safe to wire into CI or a pre-release

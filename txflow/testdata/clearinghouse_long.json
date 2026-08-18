@@ -1,0 +1,34 @@
+{
+  "assetPositions": [
+    {
+      "position": {
+        "coin": "ETH-USDC",
+        "asset": "2",
+        "entryPx": "2980.5",
+        "leverage": {"type": "Cross", "value": 10, "rawUsd": null},
+        "liquidationPx": "2500.1",
+        "marginUsed": "149.025",
+        "positionValue": "1490.25",
+        "returnOnEquity": "1.5",
+        "szi": "0.5",
+        "unrealizedPnl": "2.9",
+        "maxLeverage": 50,
+        "cumFunding": {"allTime": "", "sinceOpen": "-0.1", "sinceChange": "-0.1"},
+        "marginRatio": "10.2",
+        "adlQuantile": 1,
+        "markPx": "2986.3",
+        "updateTime": 1787052708819
+      },
+      "type": "OneWay"
+    }
+  ],
+  "crossMarginSummary": {"accountValue": "1002.900000", "totalMarginUsed": "149.025000", "totalNtlPos": "1490.250000", "totalRawUsd": "1000.000000"},
+  "marginSummary": {"accountValue": "1002.900000", "totalMarginUsed": "149.025000", "totalNtlPos": "1490.250000", "totalRawUsd": "1000.000000"},
+  "crossMaintenanceMarginUsed": "14.9025",
+  "crossMarginRatio": "10.2",
+  "withdrawable": "853.875000",
+  "totalRawUsdPlusWithdrawHold": "1000.000000",
+  "accountValuePlusWithdrawHold": "1002.900000",
+  "vaultEquity": "0.000000",
+  "time": 1787052755904
+}

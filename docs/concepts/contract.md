@@ -1,7 +1,7 @@
 # The Venue Contract
 
 `VenueExecutor` is the single interface godex uses to speak to a perpetual
-DEX — Lighter, dYdX v4, or Hyperliquid. One implementation of it exists per
+DEX — Lighter, dYdX v4, Hyperliquid, or TxFlow. One implementation of it exists per
 venue, and each instance is scoped to exactly one market: authenticated order
 placement, cancellation, and account-state observation all happen behind it,
 with the venue's own wire protocol, signing scheme, and quirks kept entirely
@@ -29,7 +29,7 @@ type VenueExecutor interface {
 
 ## Design invariants
 
-Every adapter — Lighter, dYdX v4, Hyperliquid — upholds the following. This
+Every adapter — Lighter, dYdX v4, Hyperliquid, TxFlow — upholds the following. This
 page is the canonical, detailed reference for them; treat it as complete.
 
 ### Maker orders are post-only
@@ -129,7 +129,7 @@ per shared clause, and every adapter runs the same suite against its own fake
 venue, under the same clause names:
 
 ```
-go test ./lighter/ ./dydx/ ./hyperliquid/ -run TestConformance -v
+go test ./lighter/ ./dydx/ ./hyperliquid/ ./txflow/ -run TestConformance -v
 ```
 
 An adapter supplies only a small harness — a connected executor, the order to
