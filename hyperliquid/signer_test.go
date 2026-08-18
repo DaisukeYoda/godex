@@ -2,6 +2,7 @@ package hyperliquid
 
 import (
 	"encoding/hex"
+	"github.com/DaisukeYoda/godex/internal/evmsign"
 	"testing"
 )
 
@@ -217,8 +218,8 @@ func TestWireDecimalStripsTrailingZeros(t *testing.T) {
 	}
 	for _, test := range tests {
 		value := mustDecimal(t, test.in)
-		if got := wireDecimal(value); got != test.want {
-			t.Errorf("wireDecimal(%s) = %s, want %s", test.in, got, test.want)
+		if got := evmsign.WireDecimal(value); got != test.want {
+			t.Errorf("evmsign.WireDecimal(%s) = %s, want %s", test.in, got, test.want)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package hyperliquid
 
 import (
 	"encoding/json"
+	"github.com/DaisukeYoda/godex/internal/evmsign"
 	"strings"
 	"testing"
 	"time"
@@ -67,7 +68,7 @@ func TestRoundedPricesSatisfyTheVenueRule(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RoundPriceToTick(%s, %s, %s): %v", raw, tick, side, err)
 				}
-				assertVenuePrice(t, wireDecimal(rounded), szDecimals)
+				assertVenuePrice(t, evmsign.WireDecimal(rounded), szDecimals)
 			}
 		}
 	}

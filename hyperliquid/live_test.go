@@ -12,6 +12,7 @@ package hyperliquid
 import (
 	"context"
 	"encoding/json"
+	"github.com/DaisukeYoda/godex/internal/evmsign"
 	"net/http"
 	"os"
 	"testing"
@@ -75,7 +76,7 @@ func TestLiveMetaParses(t *testing.T) {
 					t.Errorf("%s: RoundPriceToTick(%s): %v", *entry.Name, price, err)
 					continue
 				}
-				assertVenuePrice(t, wireDecimal(rounded), *entry.SzDecimals)
+				assertVenuePrice(t, evmsign.WireDecimal(rounded), *entry.SzDecimals)
 			}
 		}
 		checked++
@@ -249,9 +250,9 @@ func TestLiveL2BookPricesQuantize(t *testing.T) {
 				if err != nil {
 					t.Fatalf("RoundPriceToTick(%s): %v", price, err)
 				}
-				if wireDecimal(rounded) != wireDecimal(price) {
+				if evmsign.WireDecimal(rounded) != evmsign.WireDecimal(price) {
 					t.Errorf("live %s price %s does not survive rounding (%s): got %s",
-						testCoin, price, orderSide, wireDecimal(rounded))
+						testCoin, price, orderSide, evmsign.WireDecimal(rounded))
 				}
 			}
 		}

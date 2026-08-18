@@ -19,6 +19,7 @@ import (
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
 	"github.com/DaisukeYoda/godex/internal/dedupe"
+	"github.com/DaisukeYoda/godex/internal/evmsign"
 	"github.com/DaisukeYoda/godex/internal/ws"
 )
 
@@ -419,8 +420,8 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 		Orders: []orderWire{{
 			Asset:      e.asset.index,
 			IsBuy:      order.Side == godex.SideBuy,
-			Price:      wireDecimal(price),
-			Size:       wireDecimal(size),
+			Price:      evmsign.WireDecimal(price),
+			Size:       evmsign.WireDecimal(size),
 			ReduceOnly: order.ReduceOnly,
 			OrderType:  orderTypeWire{Limit: limitOrderWire{Tif: tif}},
 			Cloid:      string(orderID),
@@ -618,7 +619,7 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 	}
 	request := exchangeRequest{Action: action, Nonce: nonce, Signature: sig}
 	if len(e.cfg.vaultAddress) != 0 {
-		request.VaultAddress = normalizeAddress(e.cfg.vaultAddress)
+		request.VaultAddress = evmsign.NormalizeAddress(e.cfg.vaultAddress)
 	}
 
 	requestCtx, cancel := context.WithTimeout(e.lifecycleCtx, e.cfg.txRequestTimeout)
@@ -774,7 +775,7 @@ func (e *Executor) cancelForRecoveryLocked(ctx context.Context, orderID godex.Or
 	}
 	request := exchangeRequest{Action: action, Nonce: nonce, Signature: sig}
 	if len(e.cfg.vaultAddress) != 0 {
-		request.VaultAddress = normalizeAddress(e.cfg.vaultAddress)
+		request.VaultAddress = evmsign.NormalizeAddress(e.cfg.vaultAddress)
 	}
 	statuses, failure, err := postExchange(ctx, e.cfg.httpClient, e.cfg.restBaseURL, request)
 	if err != nil {

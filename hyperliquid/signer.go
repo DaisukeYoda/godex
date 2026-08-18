@@ -7,35 +7,15 @@ package hyperliquid
 // mainnet/testnet split lives in the agent's source field instead.
 
 import (
-	"encoding/hex"
 	"fmt"
-	"math/big"
-	"strings"
 
-	"github.com/decred/dcrd/dcrec/secp256k1/v4"
-	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
+	"github.com/DaisukeYoda/godex/internal/evmsign"
 )
 
-// addressLen is the byte length of an EVM-style address.
-const addressLen = 20
+var agentTypeHash = evmsign.Keccak256([]byte("Agent(string source,bytes32 connectionId)"))
 
-// compactSigLen is the length of dcrd's recoverable signature: one recovery
-// byte followed by R‖S.
-const compactSigLen = 65
-
-var (
-	eip712DomainTypeHash = keccak256([]byte(
-		"EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"))
-	agentTypeHash = keccak256([]byte("Agent(string source,bytes32 connectionId)"))
-)
-
-// signature is the venue's signature envelope. r and s are minimal-form hex
-// quantities (no zero padding), matching the reference clients.
-type signature struct {
-	R string `json:"r"`
-	S string `json:"s"`
-	V uint8  `json:"v"`
-}
+// signature is the venue's signature envelope.
+type signature = evmsign.Signature
 
 // signer produces the signature for an exchange action. The interface covers
 // the whole operation rather than the ECDSA primitive so tests can substitute
@@ -53,8 +33,7 @@ type signer interface {
 // leaked trading process cannot move funds. The master key must never reach
 // this process.
 type keySigner struct {
-	privateKey   *secp256k1.PrivateKey
-	walletAddr   string
+	key          *evmsign.KeySigner
 	source       string
 	vaultAddress []byte
 }
@@ -64,112 +43,52 @@ var _ signer = (*keySigner)(nil)
 // newKeySigner parses a hex-encoded secp256k1 private key ("0x" prefix
 // optional) and binds it to a network source and optional vault address.
 func newKeySigner(privateKeyHex, source string, vaultAddress []byte) (*keySigner, error) {
-	trimmed := strings.TrimPrefix(strings.TrimSpace(privateKeyHex), "0x")
-	keyBytes, err := hex.DecodeString(trimmed)
+	key, err := evmsign.NewKeySigner(privateKeyHex)
 	if err != nil {
-		return nil, fmt.Errorf("hyperliquid: private key is not valid hex: %w", err)
+		return nil, fmt.Errorf("hyperliquid: %w", err)
 	}
-	if len(keyBytes) != secp256k1.PrivKeyBytesLen {
-		return nil, fmt.Errorf("hyperliquid: private key must be %d bytes, got %d",
-			secp256k1.PrivKeyBytesLen, len(keyBytes))
+	if length := len(vaultAddress); length != 0 && length != evmsign.AddressLen {
+		return nil, fmt.Errorf("hyperliquid: vault address must be %d bytes, got %d", evmsign.AddressLen, length)
 	}
-	// PrivKeyFromBytes silently clamps out-of-range scalars, so reject them
-	// here: a key the venue would not recognize must fail loudly at
-	// construction, not produce signatures for the wrong address.
-	var scalar secp256k1.ModNScalar
-	if overflow := scalar.SetByteSlice(keyBytes); overflow || scalar.IsZero() {
-		return nil, fmt.Errorf("hyperliquid: private key is outside the secp256k1 group order")
-	}
-	if length := len(vaultAddress); length != 0 && length != addressLen {
-		return nil, fmt.Errorf("hyperliquid: vault address must be %d bytes, got %d", addressLen, length)
-	}
-	privateKey := secp256k1.NewPrivateKey(&scalar)
-	return &keySigner{
-		privateKey:   privateKey,
-		walletAddr:   deriveAddress(privateKey.PubKey()),
-		source:       source,
-		vaultAddress: vaultAddress,
-	}, nil
+	return &keySigner{key: key, source: source, vaultAddress: vaultAddress}, nil
 }
 
-func (s *keySigner) address() string { return s.walletAddr }
+func (s *keySigner) address() string { return s.key.Address() }
 
 func (s *keySigner) signAction(action any, nonce uint64) (signature, error) {
 	connectionID, err := actionHash(action, s.vaultAddress, nonce, nil)
 	if err != nil {
 		return signature{}, err
 	}
-	return s.sign(agentDigest(s.source, connectionID))
+	sig, err := s.key.SignDigest(agentDigest(s.source, connectionID))
+	if err != nil {
+		return signature{}, fmt.Errorf("hyperliquid: %w", err)
+	}
+	return sig, nil
 }
 
-// sign produces the recoverable (r, s, v) signature over an EIP-712 digest.
-// dcrd's signer is RFC 6979 deterministic and canonicalizes S to the lower
-// half of the group order, which is what EIP-2 requires; SignCompact returns
-// the recovery byte already offset by 27 when told the key is uncompressed,
-// which is Ethereum's v convention.
-func (s *keySigner) sign(digest [32]byte) (signature, error) {
-	compact := ecdsa.SignCompact(s.privateKey, digest[:], false)
-	if len(compact) != compactSigLen {
-		return signature{}, fmt.Errorf("hyperliquid: unexpected compact signature length %d", len(compact))
+// actionHash builds the connection id for an action; see evmsign.ActionHash.
+func actionHash(action any, vaultAddress []byte, nonce uint64, expiresAfter *uint64) ([32]byte, error) {
+	hash, err := evmsign.ActionHash(action, vaultAddress, nonce, expiresAfter)
+	if err != nil {
+		return [32]byte{}, fmt.Errorf("hyperliquid: %w", err)
 	}
-	return signature{
-		R: hexQuantity(compact[1:33]),
-		S: hexQuantity(compact[33:65]),
-		V: compact[0],
-	}, nil
+	return hash, nil
 }
 
 // agentDigest returns the EIP-712 digest of Agent{source, connectionId}.
 func agentDigest(source string, connectionID [32]byte) [32]byte {
-	sourceHash := keccak256([]byte(source))
-	structHash := keccak256(agentTypeHash[:], sourceHash[:], connectionID[:])
-	domain := domainSeparator()
-	return keccak256([]byte{0x19, 0x01}, domain[:], structHash[:])
-}
-
-// domainSeparator is the fixed EIP-712 domain hash for exchange actions.
-func domainSeparator() [32]byte {
-	nameHash := keccak256([]byte(signingDomainName))
-	versionHash := keccak256([]byte(signingDomainVersion))
-	chainID := leftPad32(big.NewInt(signingChainID).Bytes())
-	verifyingContract := [32]byte{} // the zero address, ABI-encoded
-	return keccak256(eip712DomainTypeHash[:], nameHash[:], versionHash[:], chainID[:], verifyingContract[:])
-}
-
-// leftPad32 left-pads a big-endian integer to an ABI word.
-func leftPad32(value []byte) [32]byte {
-	var word [32]byte
-	copy(word[32-len(value):], value)
-	return word
-}
-
-// hexQuantity renders big-endian bytes as a minimal-form 0x quantity, the
-// form the venue's reference clients send.
-func hexQuantity(value []byte) string {
-	trimmed := strings.TrimLeft(hex.EncodeToString(value), "0")
-	if trimmed == "" {
-		return "0x0"
-	}
-	return "0x" + trimmed
-}
-
-// deriveAddress returns the lowercase 0x address of a public key: the last 20
-// bytes of the keccak hash of its uncompressed encoding, minus the 0x04 tag.
-func deriveAddress(publicKey *secp256k1.PublicKey) string {
-	uncompressed := publicKey.SerializeUncompressed()
-	digest := keccak256(uncompressed[1:])
-	return "0x" + hex.EncodeToString(digest[12:])
+	sourceHash := evmsign.Keccak256([]byte(source))
+	structHash := evmsign.Keccak256(agentTypeHash[:], sourceHash[:], connectionID[:])
+	domain := evmsign.EIP712DomainSeparator(signingDomainName, signingDomainVersion, signingChainID, [evmsign.AddressLen]byte{})
+	return evmsign.EIP712Digest(domain, structHash)
 }
 
 // parseAddress decodes a 0x-prefixed EVM-style address.
 func parseAddress(value string) ([]byte, error) {
-	trimmed := strings.TrimPrefix(strings.TrimSpace(value), "0x")
-	decoded, err := hex.DecodeString(trimmed)
+	decoded, err := evmsign.ParseAddress(value)
 	if err != nil {
-		return nil, fmt.Errorf("hyperliquid: address %q is not valid hex: %w", value, err)
-	}
-	if len(decoded) != addressLen {
-		return nil, fmt.Errorf("hyperliquid: address %q must be %d bytes, got %d", value, addressLen, len(decoded))
+		return nil, fmt.Errorf("hyperliquid: %w", err)
 	}
 	return decoded, nil
 }
