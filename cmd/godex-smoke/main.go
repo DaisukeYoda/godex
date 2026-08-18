@@ -311,6 +311,9 @@ func runLighter(ctx context.Context, opts options) error {
 		},
 		Logf:     logf,
 		WaitFill: opts.waitFill,
+		// The venue's account stream never reports a caller's cancel (see the
+		// lighter package comment), so the cancel gate cannot wait for one.
+		CancelUnobservable: true,
 	}
 	if opts.reconnectCheck {
 		cfg.ForceReconnect = executor.ForceReconnect

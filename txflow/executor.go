@@ -13,9 +13,13 @@
 //
 // Known limitation: an order whose placing response was lost (an unknown
 // outcome) has no venue oid, so it is recovered by matching the account's
-// order history against the submission time rather than by a client order id.
-// The venue's own client sends no client id and whether the venue accepts one
-// is unverified.
+// order history — market, side, price, size, reduce-only, at or after the
+// submission time — rather than by a client order id; the venue's own client
+// sends no client id and whether the venue accepts one is unverified. An
+// identical order placed on the same account by another process inside that
+// window is indistinguishable and would be claimed and cancelled, so an
+// account this executor trades should not be traded by anything else at the
+// same time.
 package txflow
 
 import (
@@ -51,6 +55,12 @@ const recoveryClockSlack = 5 * time.Second
 type accountInvalidObservation struct {
 	err      error
 	sequence int64
+}
+
+// submission is what an order looked like when it was dispatched.
+type submission struct {
+	wire orderWire
+	at   time.Time
 }
 
 // Executor is the TxFlow implementation of godex.VenueExecutor.
@@ -95,10 +105,10 @@ type Executor struct {
 	hasMarginSnapshot    bool
 	accountInvalid       *accountInvalidObservation
 	// orders maps the executor's order ids to venue oids (0 = not yet
-	// known); submittedAt remembers when each was dispatched, which is the
-	// only handle an unknown outcome leaves behind.
+	// known); submissions remembers what each was and when it was
+	// dispatched, which is the only handle an unknown outcome leaves behind.
 	orders      map[godex.OrderID]int64
-	submittedAt map[godex.OrderID]time.Time
+	submissions map[godex.OrderID]submission
 	// oids attributes fills, which arrive by poll and possibly after the
 	// order they belong to has ended, so it outlives order tracking.
 	oids *oidIndex
@@ -150,7 +160,7 @@ func New(cfg Config) (*Executor, error) {
 		lifecycleCtx:    lifecycleCtx,
 		lifecycleCancel: lifecycleCancel,
 		orders:          make(map[godex.OrderID]int64),
-		submittedAt:     make(map[godex.OrderID]time.Time),
+		submissions:     make(map[godex.OrderID]submission),
 		oids:            newOidIndex(),
 		canceling:       make(map[godex.OrderID]struct{}),
 		orphanStatuses:  make(map[int64]string),
@@ -324,6 +334,12 @@ func (e *Executor) Close() error {
 	e.closed = true
 	e.opMu.Unlock()
 
+	// Unblock in-flight REST calls — including a submission holding txMu —
+	// and any emitter waiting on a full events channel, then tear the socket
+	// down (its Stop delivers the final DisconnectedEvent via OnDown before
+	// returning).
+	e.lifecycleCancel()
+
 	e.txMu.Lock()
 	e.acceptingTx = false
 	if e.faultTimer != nil {
@@ -332,10 +348,6 @@ func (e *Executor) Close() error {
 	}
 	e.txMu.Unlock()
 
-	// Unblock in-flight REST calls and any emitter waiting on a full events
-	// channel, then tear the socket down (its Stop delivers the final
-	// DisconnectedEvent via OnDown before returning).
-	e.lifecycleCancel()
 	if e.socket != nil {
 		_ = e.socket.Stop()
 	}
@@ -434,9 +446,9 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 	}
 
 	// Track before submitting: if the outcome turns out to be unknown, the
-	// order id and its submission time must already be known so
+	// order and its submission time must already be on record so
 	// reconciliation can look for it.
-	e.trackOrder(orderID)
+	e.trackOrder(orderID, action.Orders[0])
 	statuses, failure, err := e.submitAction(ctx, action, orderID)
 	if err != nil {
 		// An order left in flight may be live, so it stays tracked until
@@ -620,9 +632,10 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 	defer cancel()
 	statuses, failure, err := postExchange(requestCtx, e.cfg.httpClient, e.cfg.restBaseURL, request)
 	if err != nil {
-		if e.lifecycleCtx.Err() != nil {
-			return nil, "", fmt.Errorf("txflow: submission lifecycle ended: %w", e.lifecycleCtx.Err())
-		}
+		// Once dispatched, the venue may have taken the action whatever cut
+		// the call short — a Close included. That is an unknown outcome and
+		// is reported as one; a fault latched during Close is never recovered
+		// (nothing runs after Close), which is why the caller must hear it.
 		return nil, "", e.latchTxFaultLocked(err, orderID)
 	}
 	return statuses, failure, nil
@@ -695,8 +708,9 @@ func (e *Executor) scheduleFaultRecoveryLocked() {
 // records. That answer — and not a retry — is what resolves the ambiguity: an
 // order the venue never took is untracked, one it holds is cancelled. An
 // order whose oid is already known is looked up by it; one that never got an
-// ack is looked for by market and submission time, and if that search cannot
-// name exactly one order the fault stays latched — guessing here could cancel
+// ack is looked for by what was submitted — market, side, price, size,
+// reduce-only — at or after the submission time, and if that search cannot
+// name exactly one order the fault stays latched: guessing here could cancel
 // someone else's order or leave this one resting. Unreachable endpoints
 // reschedule with backoff.
 func (e *Executor) recoverTxFault() {
@@ -723,10 +737,10 @@ func (e *Executor) recoverTxFault() {
 		}
 		e.stateMu.Lock()
 		oid, tracked := e.orders[orderID]
-		submitted := e.submittedAt[orderID]
+		submitted := e.submissions[orderID]
 		if tracked && oid == 0 {
 			var found bool
-			oid, found, err = book.findSubmission(e.cfg.market, submitted.Add(-recoveryClockSlack), e.oids)
+			oid, found, err = book.findSubmission(e.cfg.market, submitted, e.oids)
 			if err != nil {
 				e.stateMu.Unlock()
 				e.logger.Error("txflow cannot attribute the submission left by an unknown outcome; "+
@@ -873,21 +887,52 @@ func (b *venueOrderBook) liveness(oid int64) orderLiveness {
 	}
 }
 
-// findSubmission looks for the one order on market, submitted at or after
-// since, that no tracked order accounts for — the order an unknown outcome
-// may have left behind. It reports (oid, true, nil) for exactly one
-// candidate, (0, false, nil) for none, and an error when several match,
-// since none of them can safely be claimed.
-func (b *venueOrderBook) findSubmission(market string, since time.Time, known *oidIndex) (int64, bool, error) {
+// findSubmission looks for the one order in the records that no tracked order
+// accounts for and that matches what was submitted — market, side, price,
+// size, reduce-only — at or after the submission time (widened by a clock
+// slack). It reports (oid, true, nil) for exactly one such order, (0, false,
+// nil) for none, and an error when several match, since none of them can
+// safely be claimed. Another process placing an identical order on the same
+// account inside the window would still be indistinguishable; that is a
+// residual risk of a venue with no client order id, and it is documented on
+// the package.
+func (b *venueOrderBook) findSubmission(market string, submitted submission, known *oidIndex) (int64, bool, error) {
+	since := submitted.at.Add(-recoveryClockSlack).UnixMilli()
+	wantSide := sideAsk
+	if submitted.wire.IsBuy {
+		wantSide = sideBid
+	}
+	wantPrice, err := decimal.FromDecimalString(submitted.wire.Price)
+	if err != nil {
+		return 0, false, fmt.Errorf("txflow: submitted price %q is malformed: %w", submitted.wire.Price, err)
+	}
+	wantSize, err := decimal.FromDecimalString(submitted.wire.Size)
+	if err != nil {
+		return 0, false, fmt.Errorf("txflow: submitted size %q is malformed: %w", submitted.wire.Size, err)
+	}
 	var (
 		found      int64
 		candidates int
 	)
 	for oid, order := range b.history {
-		if *order.Symbol != market || *order.Timestamp < since.UnixMilli() {
+		if *order.Symbol != market || *order.Timestamp < since {
 			continue
 		}
 		if _, tracked := known.lookup(oid); tracked {
+			continue
+		}
+		if *order.Side != wantSide || *order.ReduceOnly != submitted.wire.ReduceOnly {
+			continue
+		}
+		price, err := decimal.FromDecimalString(*order.LimitPx)
+		if err != nil {
+			return 0, false, fmt.Errorf("txflow: historicalOrders oid %d has malformed limitPx: %w", oid, err)
+		}
+		size, err := decimal.FromDecimalString(*order.OrigSz)
+		if err != nil {
+			return 0, false, fmt.Errorf("txflow: historicalOrders oid %d has malformed origSz: %w", oid, err)
+		}
+		if price.Cmp(wantPrice) != 0 || size.Cmp(wantSize) != 0 {
 			continue
 		}
 		found = oid
@@ -899,8 +944,7 @@ func (b *venueOrderBook) findSubmission(market string, since time.Time, known *o
 	case 1:
 		return found, true, nil
 	default:
-		return 0, false, fmt.Errorf("txflow: %d orders on %s since %s could be the ambiguous submission",
-			candidates, market, since.Format(time.RFC3339Nano))
+		return 0, false, fmt.Errorf("txflow: %d orders on %s match the ambiguous submission", candidates, market)
 	}
 }
 
@@ -987,10 +1031,10 @@ func newClientOrderID() (godex.OrderID, error) {
 	return godex.OrderID("0x" + hex.EncodeToString(raw[:])), nil
 }
 
-func (e *Executor) trackOrder(id godex.OrderID) {
+func (e *Executor) trackOrder(id godex.OrderID, wire orderWire) {
 	e.stateMu.Lock()
 	e.orders[id] = 0
-	e.submittedAt[id] = e.cfg.now()
+	e.submissions[id] = submission{wire: wire, at: e.cfg.now()}
 	e.stateMu.Unlock()
 }
 
@@ -1048,7 +1092,7 @@ func (e *Executor) untrackOrder(id godex.OrderID) {
 
 func (e *Executor) untrackOrderLocked(id godex.OrderID) {
 	delete(e.orders, id)
-	delete(e.submittedAt, id)
+	delete(e.submissions, id)
 	delete(e.canceling, id)
 }
 
@@ -1283,13 +1327,27 @@ func (e *Executor) pollFills(ctx context.Context) (bool, error) {
 		// poll, which will see the same executions again.
 		return false, nil
 	}
+	// While a submission's oid is still unknown — its response in flight, or
+	// lost and awaiting recovery — a fill under an oid this executor does not
+	// recognize may be that order's. Publishing it now would name no order
+	// and spend its trade id, so it waits for a poll after the oid is bound.
+	bindPending := false
+	for _, oid := range e.orders {
+		if oid == 0 {
+			bindPending = true
+			break
+		}
+	}
 	published := false
 	for i := range *fills {
 		fill := &(*fills)[i]
 		// Normalization runs before the trade id is remembered. A fill that
 		// fails to normalize aborts nothing but is left unseen, so the next
 		// poll — and the log — get another look at it.
-		orderID, _ := e.oids.lookup(*fill.Oid)
+		orderID, known := e.oids.lookup(*fill.Oid)
+		if !known && bindPending {
+			continue
+		}
 		event, err := normalizeFill(fill, orderID, nctx)
 		if err != nil {
 			return published, err

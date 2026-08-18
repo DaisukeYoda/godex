@@ -115,9 +115,6 @@ func (a *perpMetaAsset) validate() error {
 	if *a.Index < 0 {
 		return fmt.Errorf("txflow: %s %q has negative index %d", object, *a.Name, *a.Index)
 	}
-	if *a.SzDecimals < 0 {
-		return fmt.Errorf("txflow: %s %q has negative szDecimals %d", object, *a.Name, *a.SzDecimals)
-	}
 	if *a.MaxLeverage <= 0 {
 		return fmt.Errorf("txflow: %s %q has non-positive maxLeverage %d", object, *a.Name, *a.MaxLeverage)
 	}
@@ -267,13 +264,17 @@ func (l *openOrderList) validate() error {
 }
 
 // historicalOrderWire is the order half of a historicalOrders entry: its
-// identity and lifecycle status. Sequence-independent, so a reconciling
-// executor can attribute a terminal status to a tracked oid.
+// identity, lifecycle status, and the attributes an unknown-outcome recovery
+// matches a submission against.
 type historicalOrderWire struct {
-	Symbol    *string `json:"symbol"`
-	Oid       *int64  `json:"oid"`
-	Timestamp *int64  `json:"timestamp"`
-	Status    *string `json:"status"`
+	Symbol     *string `json:"symbol"`
+	Oid        *int64  `json:"oid"`
+	Timestamp  *int64  `json:"timestamp"`
+	Status     *string `json:"status"`
+	Side       *string `json:"side"`
+	LimitPx    *string `json:"limitPx"`
+	OrigSz     *string `json:"origSz"`
+	ReduceOnly *bool   `json:"reduceOnly"`
 }
 
 type historicalOrderEntry struct {
@@ -290,8 +291,15 @@ func (e *historicalOrderEntry) validate() error {
 		fieldCheck{"oid", e.Order.Oid != nil},
 		fieldCheck{"timestamp", e.Order.Timestamp != nil},
 		fieldCheck{"status", e.Order.Status != nil},
+		fieldCheck{"side", e.Order.Side != nil},
+		fieldCheck{"limitPx", e.Order.LimitPx != nil},
+		fieldCheck{"origSz", e.Order.OrigSz != nil},
+		fieldCheck{"reduceOnly", e.Order.ReduceOnly != nil},
 	); err != nil {
 		return err
+	}
+	if *e.Order.Side != sideBid && *e.Order.Side != sideAsk {
+		return fmt.Errorf("txflow: %s has unknown side %q", object, *e.Order.Side)
 	}
 	if !isKnownOrderStatus(*e.Order.Status) {
 		return fmt.Errorf("txflow: %s has unknown status %q", object, *e.Order.Status)

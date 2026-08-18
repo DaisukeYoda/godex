@@ -43,9 +43,15 @@ exchange response envelope, the resting-order status string — is marked
   oid the placing response returned. An order update that arrives before
   the placing response is held and applied when the oid is bound. An
   ambiguous submission — no oid — is recovered by matching the account's
-  `historicalOrders` on the market against the submission time: exactly
-  one candidate is claimed and cancelled, none clears the fault, several
-  keep it latched (nothing is guessed).
+  `historicalOrders` against what was submitted (market, side, price, size,
+  reduce-only, at or after the submission time): exactly one candidate is
+  claimed and cancelled, none clears the fault, several keep it latched
+  (nothing is guessed). Fills under an unrecognized oid are held while any
+  submission's oid is unknown, so an execution that lands before its
+  placing response is attributed rather than published nameless. A
+  submission cut short by `Close`, and any `/exchange` status other than
+  `ok`/`err`, are unknown outcomes (`ErrTxOutcomeUnknown`), never clean
+  failures.
 - **`Config.MaintenanceMarginFraction`** (required). The venue documents
   tiered, per-market maintenance rates but exposes them through no query
   the adapter has found; the caller supplies the strictest tier.
@@ -58,6 +64,14 @@ exchange response envelope, the resting-order status string — is marked
 - **`godex.VenueTxFlow`**, and `cmd/godex-smoke -venue txflow` with
   `-market`, `-maintenance-margin-fraction`, `TXFLOW_ACCOUNT_ADDRESS` and
   `TXFLOW_API_PRIVATE_KEY`.
+
+### Changed
+
+- **`smoketest` gate 2 waits for the cancelled order to be reported ended**
+  by the account stream, not merely for the cancel to be accepted — an
+  accepted cancel is no evidence the order left the book. Lighter, whose
+  stream never reports a caller's cancel, opts out through the new
+  `smoketest.Config.CancelUnobservable`.
 
 ## v0.4.0 — Market data layer
 

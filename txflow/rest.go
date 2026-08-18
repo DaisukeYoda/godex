@@ -116,6 +116,13 @@ func postExchange(ctx context.Context, client *http.Client, baseURL string, requ
 		if err := json.Unmarshal(parsed.Response, &message); err != nil {
 			message = string(parsed.Response)
 		}
+		if *parsed.Status != statusErr {
+			// Only "err" is known to mean the action was not applied. Any
+			// other discriminator — a new one, or one that means "still
+			// being processed" — is an outcome this adapter cannot read,
+			// and treating it as a refusal would let a resend double-submit.
+			return nil, "", fmt.Errorf("txflow: /exchange returned unknown status %q: %s", *parsed.Status, message)
+		}
 		return nil, fmt.Sprintf("%s: %s", *parsed.Status, message), nil
 	}
 

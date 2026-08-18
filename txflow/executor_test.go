@@ -66,6 +66,36 @@ func TestConnectEmitsVerifiedSnapshot(t *testing.T) {
 	}
 }
 
+// Thirty mainnet perps size in multiples of the base unit (szDecimals -1,
+// basePrecision "10"); they must connect and quantize like any other.
+func TestConnectAcceptsIntegerSizeSteps(t *testing.T) {
+	venue := newFakeVenue(t)
+	cfg := testConfig(venue)
+	cfg.Market = "DOGE-USDC"
+	executor, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = executor.Close() })
+	metadata, err := executor.Connect(t.Context())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	if got := metadata.SizeStep.String(); got != "10" {
+		t.Errorf("SizeStep = %s, want 10", got)
+	}
+	order := testOrder(godex.IntentPostOnly)
+	order.Price = decimal.MustFromString("0.123456", 6)
+	order.Size = decimal.MustFromString("125", 0)
+	if _, err := executor.PlaceOrder(t.Context(), order); err != nil {
+		t.Fatalf("PlaceOrder: %v", err)
+	}
+	wire := venue.lastOrderWire(t)
+	if wire.Asset != 7 || wire.Price != "0.12345" || wire.Size != "120" {
+		t.Errorf("order wire = %+v, want asset 7 price 0.12345 size 120", wire)
+	}
+}
+
 func TestConnectPublishesOpenPosition(t *testing.T) {
 	venue := newFakeVenue(t)
 	venue.setClearinghouse(string(loadFixture(t, "clearinghouse_long.json")))
@@ -444,8 +474,8 @@ func TestUnknownOutcomeWithAmbiguousCandidatesStaysLatched(t *testing.T) {
 	executor, _ := newTestExecutor(t, venue)
 	mustConnect(t, executor)
 	now := time.Now().UnixMilli()
-	venue.addOrder(testMarket, orderStatusOpen, true, now)
-	venue.addOrder(testMarket, orderStatusOpen, true, now)
+	venue.addOrder(testMarket, orderStatusOpen, true, now, testOrderAttrs)
+	venue.addOrder(testMarket, orderStatusOpen, true, now, testOrderAttrs)
 	venue.queueExchange(scriptedExchange{delay: 400 * time.Millisecond, lost: true})
 	if _, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly)); !errors.Is(err, godex.ErrTxOutcomeUnknown) {
 		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
@@ -456,6 +486,68 @@ func TestUnknownOutcomeWithAmbiguousCandidatesStaysLatched(t *testing.T) {
 	}
 	if venue.exchangeCount() != 1 {
 		t.Errorf("exchange calls = %d, want the halted executor to have sent nothing more", venue.exchangeCount())
+	}
+}
+
+// An order that differs from the submission in any attribute — side, price,
+// size, reduce-only — is somebody else's and is never claimed, however
+// recent.
+func TestUnknownOutcomeIgnoresOrdersThatDoNotMatchTheSubmission(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	now := time.Now().UnixMilli()
+	other := testOrderAttrs
+	other.limitPx = "2986.30"
+	venue.addOrder(testMarket, orderStatusOpen, true, now, other)
+	sell := testOrderAttrs
+	sell.side = sideAsk
+	venue.addOrder(testMarket, orderStatusOpen, true, now, sell)
+	reduce := testOrderAttrs
+	reduce.reduceOnly = true
+	venue.addOrder(testMarket, orderStatusOpen, true, now, reduce)
+	venue.queueExchange(scriptedExchange{delay: 400 * time.Millisecond, lost: true})
+	if _, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly)); !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	}
+	waitForFaultToClear(t, executor)
+	for _, kind := range venue.exchangeActionTypes(t) {
+		if kind == actionTypeCancel {
+			t.Fatal("recovery cancelled an order that does not match the submission")
+		}
+	}
+}
+
+// A submission cut short by Close may still have reached the venue: it is
+// reported as an unknown outcome, never as a clean failure.
+func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	venue.queueExchange(scriptedExchange{delay: 150 * time.Millisecond})
+	result := make(chan error, 1)
+	go func() {
+		_, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+		result <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	if err := executor.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := <-result; !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	}
+}
+
+// Only "err" is known to mean the action was not applied; any other status
+// is an outcome the adapter cannot read and must latch.
+func TestUnknownExchangeStatusLatchesFault(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	venue.queueExchange(scriptedExchange{body: `{"status":"pending","response":"queued"}`})
+	if _, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly)); !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
 	}
 }
 
@@ -541,6 +633,44 @@ func TestFillsArePolledAndAttributedByOid(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	if fills := countFills(collector.Events()); fills != 2 {
 		t.Errorf("published %d fills, want 2 (history and foreign markets excluded)", fills)
+	}
+}
+
+// A fill that lands before the placing response has bound its oid is held —
+// not published nameless — until a poll after the bind attributes it.
+func TestFillArrivingBeforeTheAckIsAttributed(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, collector := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	// The fake books the order (as firstFakeOid) before the scripted delay,
+	// so its fill can be on record while the response is still pending.
+	venue.queueExchange(scriptedExchange{delay: 150 * time.Millisecond})
+	done := make(chan godex.OrderAck, 1)
+	go func() {
+		ack, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentIOC))
+		if err != nil {
+			t.Errorf("PlaceOrder: %v", err)
+		}
+		done <- ack
+	}()
+	time.Sleep(30 * time.Millisecond)
+	venue.addFill(firstFakeOid, firstFakeTid)
+	// A foreign fill under an unknown oid is held too — it might be ours.
+	venue.addFill(9999, firstFakeTid+1)
+	time.Sleep(60 * time.Millisecond)
+	if fills := countFills(collector.Events()); fills != 0 {
+		t.Fatalf("published %d fills while the oid was unbound", fills)
+	}
+	ack := <-done
+	fill, at, err := collector.WaitForAt(t.Context(), 0, testEventTimeout, "fill", isFillEvent)
+	if err != nil {
+		t.Fatalf("fill: %v", err)
+	}
+	if got := fill.(godex.FillEvent); got.OrderID != ack.OrderID {
+		t.Errorf("fill = %+v, want attribution to %s", got, ack.OrderID)
+	}
+	if _, _, err := collector.WaitForAt(t.Context(), at+1, testEventTimeout, "released foreign fill", isFillEvent); err != nil {
+		t.Fatalf("the held foreign fill was never released: %v", err)
 	}
 }
 

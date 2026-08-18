@@ -165,8 +165,12 @@ the same `godex.VenueExecutor` contract — `Connect`, `PlaceOrder`,
     the venue oid the placing response returned, since the venue's client
     sends no client order id. Cancels are keyed by that oid; an ambiguous
     submission, which never got one, is recovered by matching the account's
-    order history against the submission time and cancelling the one order
-    it can be, or halting if it cannot name exactly one. Position and margin
+    order history — market, side, price, size, reduce-only, at or after the
+    submission time — and cancelling the one order it can be, or halting if
+    it cannot name exactly one. Fills under an oid the executor does not
+    recognize are held while any submission's oid is still unknown, so an
+    execution that lands before its placing response is attributed rather
+    than published nameless. Position and margin
     are read from clearinghouse snapshots; tracked orders are re-checked
     against `openOrders`/`historicalOrders` after a reconnect (the venue
     allowlists its queries, and `orderStatus` is not on the list).

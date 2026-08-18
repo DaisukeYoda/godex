@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -64,12 +65,20 @@ type scriptedExchange struct {
 
 // fakeOrder is one order in the fake venue's records.
 type fakeOrder struct {
-	oid       int64
-	symbol    string
-	status    string
-	timestamp int64
-	open      bool
+	oid        int64
+	symbol     string
+	status     string
+	timestamp  int64
+	open       bool
+	side       string
+	limitPx    string
+	origSz     string
+	reduceOnly bool
 }
+
+// testOrderAttrs is what testOrder looks like once quantized, the attributes
+// the fake renders for orders it books and plants.
+var testOrderAttrs = fakeOrder{side: sideBid, limitPx: "2986.35", origSz: "0.5"}
 
 // fakeFill is one execution in the fake venue's userFills answer.
 type fakeFill struct {
@@ -136,8 +145,8 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		case infoTypeClearinghouseState:
 			_, _ = w.Write(venue.clearinghouse)
 		case infoTypeActiveAssetData:
-			if request.Coin != fmt.Sprint(testAssetIndex) {
-				t.Errorf("activeAssetData coin = %q, want the asset index %d", request.Coin, testAssetIndex)
+			if _, err := strconv.Atoi(request.Coin); err != nil {
+				t.Errorf("activeAssetData coin = %q, want an asset index", request.Coin)
 			}
 			_, _ = fmt.Fprintf(w, `{"user":%q,"coin":%q,"leverage":{"mode":"oneWay","type":%q,"value":10,"raw_usd":null},`+
 				`"maxTradeSzs":["0.0000"],"availableToTrade":["0.000000"],"markPx":"0.0","onlyIsolated":false}`,
@@ -237,11 +246,22 @@ func (v *fakeVenue) bookActionLocked(t *testing.T, action json.RawMessage) int64
 	case actionTypeCancel:
 		return 0
 	case actionTypeOrder:
+		var decoded orderAction
+		if err := json.Unmarshal(action, &decoded); err != nil || len(decoded.Orders) != 1 {
+			t.Errorf("order action is malformed: %v", err)
+			return 0
+		}
+		wire := decoded.Orders[0]
+		side := sideAsk
+		if wire.IsBuy {
+			side = sideBid
+		}
 		oid := v.nextOid
 		v.nextOid++
 		v.orders[oid] = &fakeOrder{
 			oid: oid, symbol: testMarket, status: orderStatusOpen,
 			timestamp: time.Now().UnixMilli(), open: true,
+			side: side, limitPx: wire.Price, origSz: wire.Size, reduceOnly: wire.ReduceOnly,
 		}
 		return oid
 	default:
@@ -279,11 +299,11 @@ func (v *fakeVenue) openOrdersBody() []byte {
 func (v *fakeVenue) historicalOrdersBody() []byte {
 	entries := make([]string, 0)
 	for _, order := range v.sortedOrders() {
-		entries = append(entries, fmt.Sprintf(`{"order":{"coin":"ETH","symbol":%q,"side":"B","limitPx":"2986.35","sz":"0.5",`+
-			`"oid":%d,"timestamp":%d,"reduceOnly":false,"origSz":"0.5","tif":"GTC","cloid":null,"status":%q,`+
+		entries = append(entries, fmt.Sprintf(`{"order":{"coin":"ETH","symbol":%q,"side":%q,"limitPx":%q,"sz":"0.0",`+
+			`"oid":%d,"timestamp":%d,"reduceOnly":%t,"origSz":%q,"tif":"GTC","cloid":null,"status":%q,`+
 			`"instrumentId":%d},"status":%q,"statusTimestamp":%d}`,
-			order.symbol, order.oid, order.timestamp, order.status, testAssetIndex,
-			lowerCamel(order.status), order.timestamp))
+			order.symbol, order.side, order.limitPx, order.oid, order.timestamp, order.reduceOnly, order.origSz,
+			order.status, testAssetIndex, lowerCamel(order.status), order.timestamp))
 	}
 	return []byte("[" + strings.Join(entries, ",") + "]")
 }
@@ -422,13 +442,16 @@ func (v *fakeVenue) forgetOrder(oid int64) {
 }
 
 // addOrder plants an order the executor did not place — the way another
-// process on the account, or a lost placing response, leaves one.
-func (v *fakeVenue) addOrder(symbol, status string, open bool, timestamp int64) int64 {
+// process on the account leaves one. attrs supplies side, price, size and
+// reduce-only; symbol, status, open and timestamp are taken from the
+// arguments.
+func (v *fakeVenue) addOrder(symbol, status string, open bool, timestamp int64, attrs fakeOrder) int64 {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	oid := v.nextOid
 	v.nextOid++
-	v.orders[oid] = &fakeOrder{oid: oid, symbol: symbol, status: status, timestamp: timestamp, open: open}
+	attrs.oid, attrs.symbol, attrs.status, attrs.open, attrs.timestamp = oid, symbol, status, open, timestamp
+	v.orders[oid] = &attrs
 	return oid
 }
 

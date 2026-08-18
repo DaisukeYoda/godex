@@ -24,6 +24,9 @@ type fakeExecutor struct {
 	// misbehaviors under test
 	duplicateFillOnReconnect bool
 	acceptCrossingPostOnly   bool
+	// silentCancel accepts a cancel without ever reporting the order ended,
+	// as an adapter whose cancel wire silently does nothing would.
+	silentCancel bool
 	// staleUpdateBeforeDrop emits a position that disagrees with the account's
 	// real one after the reconnect is requested but before the drop, imitating
 	// an update still in flight when the socket goes down.
@@ -56,6 +59,9 @@ func (f *fakeExecutor) CancelOrder(_ context.Context, id godex.OrderID) error {
 		return godex.ErrUnknownOrder
 	}
 	delete(f.orders, id)
+	if !f.silentCancel {
+		f.events <- godex.OrderRejectedEvent{OrderID: id, Reason: godex.ReasonCanceledByRequest}
+	}
 	return nil
 }
 
@@ -223,6 +229,25 @@ func TestRunDetectsDuplicateFillAcrossReconnect(t *testing.T) {
 	err := Run(context.Background(), fake, testConfig(t, fake, true))
 	if err == nil || !strings.Contains(err.Error(), "duplicate fill") {
 		t.Fatalf("expected duplicate-fill gate failure, got %v", err)
+	}
+}
+
+// An accepted cancel is not evidence the order left the book: the gate waits
+// for the account stream to report it ended, unless the venue is declared
+// unable to.
+func TestRunDetectsACancelThatIsNeverReported(t *testing.T) {
+	fake := newFakeExecutor(decimal.MustFromString("80.100", 3))
+	fake.silentCancel = true
+	err := Run(context.Background(), fake, testConfig(t, fake, false))
+	if err == nil || !strings.Contains(err.Error(), "far post-only reported ended") {
+		t.Fatalf("expected the cancel gate to fail, got %v", err)
+	}
+	cfg := testConfig(t, fake, false)
+	cfg.CancelUnobservable = true
+	fake = newFakeExecutor(decimal.MustFromString("80.100", 3))
+	fake.silentCancel = true
+	if err := Run(context.Background(), fake, cfg); err != nil {
+		t.Fatalf("CancelUnobservable must relax the gate: %v", err)
 	}
 }
 

@@ -83,9 +83,11 @@ const (
 
 // Exchange response discriminators. UNVERIFIED: the /exchange response
 // envelope is assumed to follow the Hyperliquid lineage
-// ({status:"ok", response:{type, data:{statuses:[...]}}}).
+// ({status:"ok"|"err", response:{type, data:{statuses:[...]}} | message}).
+// Only these two are interpreted; any other status is an unknown outcome.
 const (
-	statusOK = "ok"
+	statusOK  = "ok"
+	statusErr = "err"
 )
 
 const (

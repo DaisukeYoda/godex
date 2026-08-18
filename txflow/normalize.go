@@ -65,7 +65,7 @@ func resolveAssetMeta(response *perpMetaResponse, market string) (assetMeta, err
 		}
 		// szDecimals and basePrecision describe the same increment two ways;
 		// a disagreement means the adapter does not understand this entry.
-		if sizeStep.Sign() <= 0 || sizeStep.Cmp(decimal.New(1, *entry.SzDecimals)) != 0 {
+		if sizeStep.Sign() <= 0 || sizeStep.Cmp(sizeStepFor(*entry.SzDecimals)) != 0 {
 			return assetMeta{}, fmt.Errorf("txflow: perp %s has basePrecision %s, which disagrees with szDecimals %d",
 				market, *entry.BasePrecision, *entry.SzDecimals)
 		}
@@ -79,6 +79,20 @@ func resolveAssetMeta(response *perpMetaResponse, market string) (assetMeta, err
 		return assetMeta{index: *entry.Index, sizeStep: sizeStep, priceTick: priceTick}, nil
 	}
 	return assetMeta{}, fmt.Errorf("txflow: perp not found in universe: %s", market)
+}
+
+// sizeStepFor is 10^-szDecimals. szDecimals is negative for perps whose size
+// increment is a multiple of the base unit (DOGE trades in tens), which
+// decimal expresses as an integer step at scale zero.
+func sizeStepFor(szDecimals int) decimal.Decimal {
+	if szDecimals >= 0 {
+		return decimal.New(1, szDecimals)
+	}
+	step := int64(1)
+	for range -szDecimals {
+		step *= 10
+	}
+	return decimal.New(step, 0)
 }
 
 // normalizeAccount turns a clearinghouse snapshot into a position and margin
