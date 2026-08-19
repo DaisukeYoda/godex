@@ -636,11 +636,18 @@ func TestReduceOnlySizeCeilsToCloseFully(t *testing.T) {
 
 func fillFrame(t *testing.T, isSnapshot bool, tradeIDs ...int64) []byte {
 	t.Helper()
+	return fillFrameFor(t, isSnapshot, testFillCloid, tradeIDs...)
+}
+
+// fillFrameFor is fillFrame for a nominated client order id, which is what
+// attributes the execution to a caller's order.
+func fillFrameFor(t *testing.T, isSnapshot bool, cloid string, tradeIDs ...int64) []byte {
+	t.Helper()
 	fills := make([]string, 0, len(tradeIDs))
 	for _, tradeID := range tradeIDs {
 		fills = append(fills, fmt.Sprintf(`{"coin":"ETH","px":"2986.3","sz":"0.5","side":"B",`+
 			`"time":1753660000000,"oid":77738308,"tid":%d,"fee":"0.0447",`+
-			`"cloid":"0x0000000000000000000000000000abcd"}`, tradeID))
+			`"cloid":%q}`, tradeID, cloid))
 	}
 	return fmt.Appendf(nil, `{"channel":"userFills","data":{"isSnapshot":%t,"user":%q,"fills":[%s]}}`,
 		isSnapshot, testAccount, strings.Join(fills, ","))

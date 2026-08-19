@@ -1,0 +1,12 @@
+{
+  "assetPositions": [],
+  "crossMarginSummary": {"accountValue": "1000.000000", "totalMarginUsed": "0.000000", "totalNtlPos": "0.000000", "totalRawUsd": "1000.000000"},
+  "marginSummary": {"accountValue": "1000.000000", "totalMarginUsed": "0.000000", "totalNtlPos": "0.000000", "totalRawUsd": "1000.000000"},
+  "crossMaintenanceMarginUsed": "0.000000",
+  "crossMarginRatio": "0",
+  "withdrawable": "1000.000000",
+  "totalRawUsdPlusWithdrawHold": "1000.000000",
+  "accountValuePlusWithdrawHold": "1000.000000",
+  "vaultEquity": "0.000000",
+  "time": 1787052755904
+}

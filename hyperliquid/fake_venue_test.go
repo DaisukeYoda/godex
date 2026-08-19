@@ -28,6 +28,9 @@ const (
 	// ETH sits at index 4 in the fixture universe, so a test that silently
 	// used the first entry would fail.
 	testAssetIndex = 4
+	// testFillCloid is the client order id a fill carries when the case does
+	// not care which order it belongs to.
+	testFillCloid = "0x0000000000000000000000000000abcd"
 )
 
 func loadFixture(t *testing.T, name string) []byte {
@@ -63,6 +66,7 @@ type fakeVenue struct {
 	orderQueryInner  string
 	leverageType     string
 	snapshotFills    []int64
+	snapshotCloid    string
 	suppressSnapshot bool
 	exchangeQueue    []scriptedExchange
 	exchangeCalls    []exchangeRequest
@@ -133,7 +137,7 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		venue.mu.Lock()
 		venue.exchangeCalls = append(venue.exchangeCalls, request)
 		venue.exchangeActions = append(venue.exchangeActions, raw.Action)
-		script := scriptedExchange{body: `{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":77738308}}]}}}`}
+		script := scriptedExchange{body: defaultExchangeBody(raw.Action)}
 		if len(venue.exchangeQueue) > 0 {
 			script = venue.exchangeQueue[0]
 			venue.exchangeQueue = venue.exchangeQueue[1:]
@@ -164,9 +168,13 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 			}
 			venue.mu.Lock()
 			venue.inbound = append(venue.inbound, string(data))
-			snapshotFills, suppress := venue.snapshotFills, venue.suppressSnapshot
+			snapshot := fillSnapshot{
+				tradeIDs: venue.snapshotFills,
+				cloid:    venue.snapshotCloid,
+				suppress: venue.suppressSnapshot,
+			}
 			venue.mu.Unlock()
-			venue.answerSubscription(t, conn, data, snapshotFills, suppress)
+			venue.answerSubscription(t, conn, data, snapshot)
 		}
 	})
 
@@ -174,6 +182,21 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 	venue.wsURL = "ws" + strings.TrimPrefix(venue.server.URL, "http") + "/ws"
 	t.Cleanup(venue.server.Close)
 	return venue
+}
+
+// defaultExchangeBody is the venue's success answer for an action no case has
+// scripted. The venue answers a cancel with a cancel response and an order with
+// an order response, so a case that only cares about one of them does not have
+// to script the other.
+func defaultExchangeBody(action json.RawMessage) string {
+	var decoded struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(action, &decoded)
+	if decoded.Type == actionTypeCancelByCloid {
+		return `{"status":"ok","response":{"type":"cancel","data":{"statuses":["success"]}}}`
+	}
+	return `{"status":"ok","response":{"type":"order","data":{"statuses":[{"resting":{"oid":77738308}}]}}}`
 }
 
 func (v *fakeVenue) queueExchange(scripts ...scriptedExchange) {
@@ -296,6 +319,16 @@ func (s *recordingSigner) address() string { return s.inner.address() }
 
 func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *smoketest.Collector) {
 	t.Helper()
+	executor, collector, _ := newTestExecutorStream(t, venue)
+	return executor, collector
+}
+
+// newTestExecutorStream is newTestExecutor, also reporting when the account
+// event channel has closed and the collector therefore holds the whole stream.
+// Close returning is not that moment; the conformance suite needs the one that
+// is.
+func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *smoketest.Collector, <-chan struct{}) {
+	t.Helper()
 	executor, err := New(Config{
 		Credentials: Credentials{
 			AccountAddress: testAccount,
@@ -346,7 +379,7 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *smoketest.Coll
 		_ = executor.Close()
 		<-consumed
 	})
-	return executor, collector
+	return executor, collector, consumed
 }
 
 func mustConnect(t *testing.T, executor *Executor) godex.ExecutionMetadata {
@@ -386,10 +419,18 @@ func isRejectionEvent(e godex.AccountEvent) bool {
 	return ok
 }
 
+// fillSnapshot is the opening userFills frame the venue is currently scripted
+// to send, read under the lock and replayed on every subscription.
+type fillSnapshot struct {
+	tradeIDs []int64
+	cloid    string
+	suppress bool
+}
+
 // answerSubscription mirrors the venue's own handshake: it acknowledges the
 // subscription and, for userFills, follows with the opening snapshot Connect
 // waits on.
-func (v *fakeVenue) answerSubscription(t *testing.T, conn *websocket.Conn, data []byte, fills []int64, suppress bool) {
+func (v *fakeVenue) answerSubscription(t *testing.T, conn *websocket.Conn, data []byte, snapshot fillSnapshot) {
 	t.Helper()
 	var request struct {
 		Method       string            `json:"method"`
@@ -399,16 +440,28 @@ func (v *fakeVenue) answerSubscription(t *testing.T, conn *websocket.Conn, data 
 		return
 	}
 	_ = v.write(conn, []byte(`{"channel":"subscriptionResponse","data":{"method":"subscribe"}}`))
-	if request.Subscription["type"] != channelUserFills || suppress {
+	if request.Subscription["type"] != channelUserFills || snapshot.suppress {
 		return
 	}
-	_ = v.write(conn, fillFrame(t, true, fills...))
+	cloid := snapshot.cloid
+	if cloid == "" {
+		cloid = testFillCloid
+	}
+	_ = v.write(conn, fillFrameFor(t, true, cloid, snapshot.tradeIDs...))
 }
 
 func (v *fakeVenue) setSnapshotFills(tradeIDs ...int64) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	v.snapshotFills = tradeIDs
+}
+
+// setSnapshotFillsFor is setSnapshotFills for fills belonging to a nominated
+// order, which is how a reconnect can be made to replay one already delivered.
+func (v *fakeVenue) setSnapshotFillsFor(cloid string, tradeIDs ...int64) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	v.snapshotCloid, v.snapshotFills = cloid, tradeIDs
 }
 
 func (v *fakeVenue) setSuppressSnapshot(suppress bool) {

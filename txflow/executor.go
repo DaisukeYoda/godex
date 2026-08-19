@@ -1,9 +1,26 @@
-// Package hyperliquid implements godex.VenueExecutor for Hyperliquid. It
-// signs limit orders (post-only / IOC) with an API (agent) wallet and submits
-// them to the /exchange endpoint, observing the account through the
-// authenticated userFills and orderUpdates streams plus clearinghouse
-// snapshots.
-package hyperliquid
+// Package txflow implements godex.VenueExecutor for TxFlow. It signs limit
+// orders (post-only / IOC) with a trading (agent) wallet and submits them to
+// the /exchange endpoint, observing the account through the orderUpdates
+// stream, clearinghouse snapshots, and the userFills query.
+//
+// TxFlow's API descends from Hyperliquid's, with differences this package
+// absorbs: markets are keyed by an explicit asset index, the info endpoint
+// allowlists its query types (no meta, orderStatus, or fills stream), the
+// signing domain and Agent struct are wider, and — the one that shapes the
+// executor — fills are not streamed. Executions are read by polling the
+// userFills query, deduplicated by trade id, and attributed to orders by the
+// venue oid the placing response returned.
+//
+// Known limitation: an order whose placing response was lost (an unknown
+// outcome) has no venue oid, so it is recovered by matching the account's
+// order history — market, side, price, size, reduce-only, at or after the
+// submission time — rather than by a client order id; the venue's own client
+// sends no client id and whether the venue accepts one is unverified. An
+// identical order placed on the same account by another process inside that
+// window is indistinguishable and would be claimed and cancelled, so an
+// account this executor trades should not be traded by anything else at the
+// same time.
+package txflow
 
 import (
 	"context"
@@ -12,7 +29,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"strings"
+	"strconv"
 	"sync"
 	"time"
 
@@ -23,25 +40,30 @@ import (
 	"github.com/DaisukeYoda/godex/internal/ws"
 )
 
-const wsLabel = "hyperliquid-account"
+const wsLabel = "txflow-account"
 
-// assetMeta is the resolved venue metadata for the traded perp.
-type assetMeta struct {
-	// index is the perp's position in the universe array, which is the id
-	// orders and cancels are keyed by.
-	index      int
-	szDecimals int
-	// maintenanceLeverage is the strictest tier of the perp's margin
-	// schedule, not the headline max leverage.
-	maintenanceLeverage int
-}
+// fillCacheCapacity bounds the remembered trade ids. Every userFills poll
+// replays the account's recent executions (a few hundred), so a cache many
+// times that size cannot evict an id that is still being replayed.
+const fillCacheCapacity = 8192
+
+// recoveryClockSlack widens the submission-time window an unknown-outcome
+// recovery searches, so a venue clock slightly behind this process cannot
+// hide the order being looked for.
+const recoveryClockSlack = 5 * time.Second
 
 type accountInvalidObservation struct {
 	err      error
 	sequence int64
 }
 
-// Executor is the Hyperliquid implementation of godex.VenueExecutor.
+// submission is what an order looked like when it was dispatched.
+type submission struct {
+	wire orderWire
+	at   time.Time
+}
+
+// Executor is the TxFlow implementation of godex.VenueExecutor.
 type Executor struct {
 	cfg    *resolvedConfig
 	logger *slog.Logger
@@ -82,34 +104,43 @@ type Executor struct {
 	hasPositionSnapshot  bool
 	hasMarginSnapshot    bool
 	accountInvalid       *accountInvalidObservation
-	orders               map[godex.OrderID]int64 // client order id -> venue oid (0 = not yet known)
-	ordersByOid          map[int64]godex.OrderID
+	// orders maps the executor's order ids to venue oids (0 = not yet
+	// known); submissions remembers what each was and when it was
+	// dispatched, which is the only handle an unknown outcome leaves behind.
+	orders      map[godex.OrderID]int64
+	submissions map[godex.OrderID]submission
+	// oids attributes fills, which arrive by poll and possibly after the
+	// order they belong to has ended, so it outlives order tracking.
+	oids *oidIndex
 	// canceling holds orders whose cancel the venue accepted. They stay
 	// tracked, because only the account stream (or reconciliation) can say
 	// how the order actually ended — a cancel accepted the instant the order
 	// filled applies to nothing. Membership is what makes a second cancel
 	// unaddressable and what labels the terminal event when it arrives.
 	canceling map[godex.OrderID]struct{}
-	fills     *fillCache
+	// orphanStatuses remembers order updates for oids no order was bound to
+	// yet. The placing response and the order's first update race, and an
+	// update that wins — an IOC filled in the same block, say — must not be
+	// lost: it is applied the moment the oid is bound.
+	orphanStatuses map[int64]string
+	fills          *dedupe.Set[int64]
+	// fillHistorySeeded records that the first userFills read has been
+	// absorbed. That read is the account's history, not this executor's
+	// work, so it seeds the dedupe cache without being published; every later
+	// poll publishes whatever it carries that the cache has not seen.
+	fillHistorySeeded bool
 	// connGeneration counts connections; connOpen tracks whether the current
-	// one is up. Account reads run off the socket, so a slow response can
-	// land after its connection dropped — the pair is what keeps those
-	// results from being published outside a Connected/Disconnected window.
+	// one is up. Account and fill reads run off the socket, so a slow
+	// response can land after its connection dropped — the pair is what keeps
+	// those results from being published outside a Connected/Disconnected
+	// window.
 	connGeneration int
 	connOpen       bool
-	// fillHistorySeeded records that the first userFills snapshot has been
-	// absorbed. That snapshot is the account's history, not this executor's
-	// work, so it seeds the dedupe cache without being published; later
-	// snapshots (one per reconnect) publish whatever they carry that the
-	// cache has not seen, which is exactly the fills missed while down.
-	fillHistorySeeded bool
-	// fillSnapshotReady closes once that first snapshot has been absorbed.
-	// Connect waits on it: accepting an order earlier would let its fill
-	// arrive inside a late snapshot and be discarded as history.
-	fillSnapshotReady chan struct{}
-	fillSnapshotOnce  sync.Once
 
-	pollerWG sync.WaitGroup
+	// fillPollTrigger wakes the fill poller ahead of its tick, after an
+	// event that makes a fill likely (a filled order update, a reconnect).
+	fillPollTrigger chan struct{}
+	pollerWG        sync.WaitGroup
 }
 
 var _ godex.VenueExecutor = (*Executor)(nil)
@@ -122,23 +153,25 @@ func New(cfg Config) (*Executor, error) {
 	}
 	lifecycleCtx, lifecycleCancel := context.WithCancel(context.Background())
 	return &Executor{
-		cfg:               resolved,
-		logger:            resolved.logger,
-		events:            make(chan godex.AccountEvent, godex.DefaultAccountEventBuffer),
-		rejections:        dedupe.NewSet[godex.OrderID](dedupe.RejectionCapacity),
-		lifecycleCtx:      lifecycleCtx,
-		lifecycleCancel:   lifecycleCancel,
-		orders:            make(map[godex.OrderID]int64),
-		ordersByOid:       make(map[int64]godex.OrderID),
-		canceling:         make(map[godex.OrderID]struct{}),
-		fills:             newFillCache(),
-		fillSnapshotReady: make(chan struct{}),
+		cfg:             resolved,
+		logger:          resolved.logger,
+		events:          make(chan godex.AccountEvent, godex.DefaultAccountEventBuffer),
+		rejections:      dedupe.NewSet[godex.OrderID](dedupe.RejectionCapacity),
+		lifecycleCtx:    lifecycleCtx,
+		lifecycleCancel: lifecycleCancel,
+		orders:          make(map[godex.OrderID]int64),
+		submissions:     make(map[godex.OrderID]submission),
+		oids:            newOidIndex(),
+		canceling:       make(map[godex.OrderID]struct{}),
+		orphanStatuses:  make(map[int64]string),
+		fills:           dedupe.NewSet[int64](fillCacheCapacity),
+		fillPollTrigger: make(chan struct{}, 1),
 	}, nil
 }
 
 // VenueID implements godex.VenueExecutor.
 func (e *Executor) VenueID() godex.VenueID {
-	return godex.VenueHyperliquid
+	return godex.VenueTxFlow
 }
 
 // AccountEvents implements godex.VenueExecutor.
@@ -147,8 +180,9 @@ func (e *Executor) AccountEvents() <-chan godex.AccountEvent {
 }
 
 // Connect implements godex.VenueExecutor: it resolves the perp's asset id and
-// quantization, builds the signer, starts the account streams, and completes
-// only after a verified clearinghouse snapshot has been emitted.
+// quantization, builds the signer, absorbs the account's fill history, starts
+// the account stream, and completes only after a verified clearinghouse
+// snapshot has been emitted.
 func (e *Executor) Connect(ctx context.Context) (godex.ExecutionMetadata, error) {
 	e.opMu.Lock()
 	if e.closed {
@@ -157,7 +191,7 @@ func (e *Executor) Connect(ctx context.Context) (godex.ExecutionMetadata, error)
 	}
 	if e.connected {
 		e.opMu.Unlock()
-		return godex.ExecutionMetadata{}, fmt.Errorf("hyperliquid: executor already connected")
+		return godex.ExecutionMetadata{}, fmt.Errorf("txflow: executor already connected")
 	}
 	e.connected = true
 	e.opMu.Unlock()
@@ -186,14 +220,20 @@ func (e *Executor) connect(ctx context.Context) (godex.ExecutionMetadata, error)
 		return godex.ExecutionMetadata{}, err
 	}
 	e.signer = sgnr
-	e.logger.Info("hyperliquid signer ready",
-		"agent_address", sgnr.address(), "account", e.cfg.userAddress, "coin", e.cfg.coin)
-	e.warnIfAgentUnlisted(ctx, sgnr.address())
+	e.logger.Info("txflow signer ready",
+		"agent_address", sgnr.address(), "account", e.cfg.accountAddress, "market", e.cfg.market)
 
 	// Margin mode is checked before the socket opens: an order action does
 	// not carry one, so an account left in isolated mode would silently open
 	// a position the adapter's whole-account liquidation math cannot describe.
 	if err := e.assertCrossMargin(ctx); err != nil {
+		return godex.ExecutionMetadata{}, err
+	}
+
+	// The account's fill history is absorbed before any order can be placed:
+	// until then the executor cannot tell history from its own executions,
+	// and accepting an order first would risk suppressing its fill.
+	if err := e.seedFillHistory(ctx); err != nil {
 		return godex.ExecutionMetadata{}, err
 	}
 
@@ -206,30 +246,23 @@ func (e *Executor) connect(ctx context.Context) (godex.ExecutionMetadata, error)
 		return godex.ExecutionMetadata{}, err
 	}
 
-	if err := e.awaitFillSnapshot(ctx); err != nil {
-		_ = e.socket.Stop()
-		return godex.ExecutionMetadata{}, err
-	}
 	if err := e.applyInitialSnapshot(ctx); err != nil {
 		_ = e.socket.Stop()
 		return godex.ExecutionMetadata{}, err
 	}
 
-	e.pollerWG.Add(2)
+	e.pollerWG.Add(3)
 	go e.pingLoop()
 	go e.accountPollLoop()
+	go e.fillPollLoop()
 
 	e.txMu.Lock()
 	e.acceptingTx = true
 	e.txMu.Unlock()
 
-	marginFraction, err := maintenanceMarginFraction(asset.maintenanceLeverage)
-	if err != nil {
-		return godex.ExecutionMetadata{}, err
-	}
 	return godex.ExecutionMetadata{
-		SizeStep:                  decimal.New(1, asset.szDecimals),
-		MaintenanceMarginFraction: marginFraction,
+		SizeStep:                  asset.sizeStep,
+		MaintenanceMarginFraction: e.cfg.marginFraction,
 	}, nil
 }
 
@@ -251,34 +284,21 @@ func (e *Executor) resetObservationState() {
 	e.txMu.Unlock()
 }
 
-// loadAssetMeta resolves the configured coin to its asset id and
-// quantization. The id is the coin's index in the universe array, so the
-// lookup must walk the array rather than trust any field inside an entry.
+// loadAssetMeta resolves the configured market to its asset id and
+// quantization.
 func (e *Executor) loadAssetMeta(ctx context.Context) (assetMeta, error) {
-	response, err := postJSON[metaResponse](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
-		infoRequest{Type: infoTypeMeta})
+	response, err := postJSON[perpMetaResponse](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
+		infoRequest{Type: infoTypePerpMeta})
 	if err != nil {
 		return assetMeta{}, err
 	}
-	tables := response.marginTablesByID()
-	for index := range *response.Universe {
-		entry := &(*response.Universe)[index]
-		if *entry.Name != e.cfg.coin {
-			continue
-		}
-		if entry.IsDelisted != nil && *entry.IsDelisted {
-			return assetMeta{}, fmt.Errorf("hyperliquid: perp %s is delisted", e.cfg.coin)
-		}
-		if entry.OnlyIsolated != nil && *entry.OnlyIsolated {
-			return assetMeta{}, fmt.Errorf("hyperliquid: perp %s is isolated-margin only, which is unsupported", e.cfg.coin)
-		}
-		leverage, err := maintenanceLeverage(entry, tables)
-		if err != nil {
-			return assetMeta{}, err
-		}
-		return assetMeta{index: index, szDecimals: *entry.SzDecimals, maintenanceLeverage: leverage}, nil
-	}
-	return assetMeta{}, fmt.Errorf("hyperliquid: perp not found in universe: %s", e.cfg.coin)
+	return resolveAssetMeta(response, e.cfg.market)
+}
+
+// coinParam is the market's asset index in the form per-market info queries
+// take.
+func (e *Executor) coinParam() string {
+	return strconv.Itoa(e.asset.index)
 }
 
 // applyInitialSnapshot fetches the initial clearinghouse snapshot, retrying
@@ -299,7 +319,7 @@ func (e *Executor) applyInitialSnapshot(ctx context.Context) error {
 	complete := applied && e.hasPositionSnapshot && e.hasMarginSnapshot && e.accountInvalid == nil
 	e.stateMu.Unlock()
 	if !complete {
-		return fmt.Errorf("hyperliquid: initial account snapshot was not fully applied")
+		return fmt.Errorf("txflow: initial account snapshot was not fully applied")
 	}
 	return nil
 }
@@ -314,6 +334,12 @@ func (e *Executor) Close() error {
 	e.closed = true
 	e.opMu.Unlock()
 
+	// Unblock in-flight REST calls — including a submission holding txMu —
+	// and any emitter waiting on a full events channel, then tear the socket
+	// down (its Stop delivers the final DisconnectedEvent via OnDown before
+	// returning).
+	e.lifecycleCancel()
+
 	e.txMu.Lock()
 	e.acceptingTx = false
 	if e.faultTimer != nil {
@@ -322,10 +348,6 @@ func (e *Executor) Close() error {
 	}
 	e.txMu.Unlock()
 
-	// Unblock in-flight REST calls and any emitter waiting on a full events
-	// channel, then tear the socket down (its Stop delivers the final
-	// DisconnectedEvent via OnDown before returning).
-	e.lifecycleCancel()
 	if e.socket != nil {
 		_ = e.socket.Stop()
 	}
@@ -376,29 +398,24 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 	invalid := e.accountInvalid
 	e.stateMu.Unlock()
 	if invalid != nil {
-		return godex.OrderAck{}, fmt.Errorf("hyperliquid: account state is invalid: %w", invalid.err)
+		return godex.OrderAck{}, fmt.Errorf("txflow: account state is invalid: %w", invalid.err)
 	}
 	if order.Symbol != e.cfg.symbol {
-		return godex.OrderAck{}, fmt.Errorf("hyperliquid: executor is configured for %s, got %s", e.cfg.symbol, order.Symbol)
+		return godex.OrderAck{}, fmt.Errorf("txflow: executor is configured for %s, got %s", e.cfg.symbol, order.Symbol)
 	}
 	if e.signer == nil {
 		return godex.OrderAck{}, godex.ErrNotConnected
 	}
 
-	tick, err := priceTick(order.Price, e.asset.szDecimals)
+	price, err := godex.RoundPriceToTick(order.Price, e.asset.priceTick, order.Side)
 	if err != nil {
 		return godex.OrderAck{}, err
 	}
-	price, err := godex.RoundPriceToTick(order.Price, tick, order.Side)
-	if err != nil {
-		return godex.OrderAck{}, err
-	}
-	step := decimal.New(1, e.asset.szDecimals)
 	var size decimal.Decimal
 	if order.ReduceOnly {
-		size, err = godex.QuantizeReduceOnlySize(order.Size, step)
+		size, err = godex.QuantizeReduceOnlySize(order.Size, e.asset.sizeStep)
 	} else {
-		size, err = godex.QuantizeSize(order.Size, step, step)
+		size, err = godex.QuantizeSize(order.Size, e.asset.sizeStep, e.asset.sizeStep)
 	}
 	if err != nil {
 		return godex.OrderAck{}, err
@@ -408,7 +425,7 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 	if order.Intent == godex.IntentPostOnly {
 		tif = tifALO
 	} else if order.Intent != godex.IntentIOC {
-		return godex.OrderAck{}, fmt.Errorf("hyperliquid: unsupported order intent %q", order.Intent)
+		return godex.OrderAck{}, fmt.Errorf("txflow: unsupported order intent %q", order.Intent)
 	}
 
 	orderID, err := newClientOrderID()
@@ -416,7 +433,8 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 		return godex.OrderAck{}, err
 	}
 	action := orderAction{
-		Type: actionTypeOrder,
+		Type:     actionTypeOrder,
+		Grouping: groupingNA,
 		Orders: []orderWire{{
 			Asset:      e.asset.index,
 			IsBuy:      order.Side == godex.SideBuy,
@@ -424,15 +442,13 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 			Size:       evmsign.WireDecimal(size),
 			ReduceOnly: order.ReduceOnly,
 			OrderType:  orderTypeWire{Limit: limitOrderWire{Tif: tif}},
-			Cloid:      string(orderID),
 		}},
-		Grouping: groupingNA,
 	}
 
 	// Track before submitting: if the outcome turns out to be unknown, the
-	// order id must already be known so reconciliation can ask the venue
-	// about it.
-	e.trackOrder(orderID)
+	// order and its submission time must already be on record so
+	// reconciliation can look for it.
+	e.trackOrder(orderID, action.Orders[0])
 	statuses, failure, err := e.submitAction(ctx, action, orderID)
 	if err != nil {
 		// An order left in flight may be live, so it stays tracked until
@@ -445,7 +461,7 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 	}
 	if failure != "" {
 		e.untrackOrder(orderID)
-		return godex.OrderAck{}, fmt.Errorf("hyperliquid: order placement failed: %s", failure)
+		return godex.OrderAck{}, fmt.Errorf("txflow: order placement failed: %s", failure)
 	}
 
 	status, err := decodeOrderStatus(statuses)
@@ -460,31 +476,31 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 		if postOnlyRejectPattern.MatchString(*status.Error) {
 			e.emitEvent(godex.OrderRejectedEvent{OrderID: orderID, Reason: *status.Error})
 			return godex.OrderAck{
-				OrderID: orderID, VenueID: godex.VenueHyperliquid,
+				OrderID: orderID, VenueID: godex.VenueTxFlow,
 				Status: godex.AckRejected, Time: e.cfg.now(),
 			}, nil
 		}
-		return godex.OrderAck{}, fmt.Errorf("hyperliquid: order rejected: %s", *status.Error)
+		return godex.OrderAck{}, fmt.Errorf("txflow: order rejected: %s", *status.Error)
 	case status.Resting != nil:
 		e.bindOrderOid(orderID, *status.Resting.Oid)
 	case status.Filled != nil:
-		// The execution itself is reported by the account stream, which is
-		// the only source of truth for fills; the oid is bound so a
-		// subsequent order update can be attributed.
+		// The execution itself is reported from the userFills query, which
+		// is the only source of truth for fills; the oid is bound so it can
+		// be attributed, and the poller is woken so it lands promptly.
 		e.bindOrderOid(orderID, *status.Filled.Oid)
+		e.triggerFillPoll()
 	default:
 		return godex.OrderAck{}, e.latchTxFault(
-			fmt.Errorf("hyperliquid: order status carried no recognized outcome"), orderID)
+			fmt.Errorf("txflow: order status carried no recognized outcome"), orderID)
 	}
 	return godex.OrderAck{
-		OrderID: orderID, VenueID: godex.VenueHyperliquid,
+		OrderID: orderID, VenueID: godex.VenueTxFlow,
 		Status: godex.AckSubmitted, Time: e.cfg.now(),
 	}, nil
 }
 
 // CancelOrder implements godex.VenueExecutor. Cancellation is keyed by the
-// client order id assigned before submission, so it stays possible even when
-// the placing response was lost.
+// venue oid the placing response returned.
 //
 // A venue answer of "never placed, already canceled, or filled" is reported
 // as success: the cancel's purpose already holds, which is what makes a
@@ -496,9 +512,9 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 	defer e.endOp()
 
 	e.stateMu.Lock()
-	_, tracked := e.orders[id]
+	oid, tracked := e.orders[id]
 	_, alreadyCanceling := e.canceling[id]
-	if tracked && !alreadyCanceling {
+	if tracked && !alreadyCanceling && oid != 0 {
 		// Recorded before dispatch, not after the answer: the account stream
 		// can report the order gone while the cancel is still in flight, and
 		// the reason that report carries must not depend on which of the two
@@ -510,18 +526,23 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 	if !tracked || alreadyCanceling {
 		return fmt.Errorf("%w: %s", godex.ErrUnknownOrder, id)
 	}
+	if oid == 0 {
+		// Only an order whose placing outcome is unknown lacks an oid, and
+		// its caller never received this id; recovery is what settles it.
+		return fmt.Errorf("txflow: order %s has no venue id yet: %w", id, godex.ErrTxOutcomeUnknown)
+	}
 
-	action := cancelByCloidAction{
-		Type:    actionTypeCancelByCloid,
-		Cancels: []cancelByCloidWire{{Asset: e.asset.index, Cloid: string(id)}},
+	action := cancelAction{
+		Type:    actionTypeCancel,
+		Cancels: []cancelWire{{Asset: e.asset.index, Oid: oid}},
 	}
 	// A cancel that did not take leaves the order addressable again, so the
 	// intent is withdrawn on every path that does not return success —
-	// including an unknown outcome, because cancel-by-cloid is idempotent and
-	// retrying it is how that fault recovers. The cost is that a cancel which
-	// did apply after an unknown outcome is reported under the venue's own
-	// wording; that is the honest answer, since the adapter never learned its
-	// cancel was the cause.
+	// including an unknown outcome, because cancelling by oid is idempotent
+	// and retrying it is how that fault recovers. The cost is that a cancel
+	// which did apply after an unknown outcome is reported under the venue's
+	// own wording; that is the honest answer, since the adapter never learned
+	// its cancel was the cause.
 	statuses, failure, err := e.submitAction(ctx, action, id)
 	if err != nil {
 		e.clearCancelIntent(id)
@@ -529,7 +550,7 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 	}
 	if failure != "" {
 		e.clearCancelIntent(id)
-		return fmt.Errorf("hyperliquid: cancel failed: %s", failure)
+		return fmt.Errorf("txflow: cancel failed: %s", failure)
 	}
 	message, err := decodeCancelStatus(statuses)
 	if err != nil {
@@ -548,7 +569,7 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 			return nil
 		}
 		e.clearCancelIntent(id)
-		return fmt.Errorf("hyperliquid: cancel failed: %s", message)
+		return fmt.Errorf("txflow: cancel failed: %s", message)
 	}
 	// The venue accepted the cancel, which is not the same as the order having
 	// ended by it: a cancel accepted the instant the order filled applies to
@@ -565,36 +586,24 @@ func (e *Executor) clearCancelIntent(id godex.OrderID) {
 
 // resolveGoneOrder settles an order the venue says it no longer holds, so the
 // order is retired under the reason the venue gives rather than silently. An
-// order that turns out to have filled is retired without a rejection; one the
-// venue cannot classify stays tracked for the next reconciliation.
+// order that turns out to have filled is retired without a rejection.
 func (e *Executor) resolveGoneOrder(ctx context.Context, id godex.OrderID) {
-	liveness, reason, err := e.queryOrderLiveness(ctx, id)
+	book, err := e.readOrderBook(ctx)
 	if err != nil {
-		e.logger.Warn("hyperliquid could not resolve a cancelled order's outcome; "+
+		e.logger.Warn("txflow could not resolve a cancelled order's outcome; "+
 			"it stays tracked for reconciliation", "order_id", id, "error", err)
 		return
 	}
-	switch liveness {
-	case orderLive:
-		// The venue holds it after all; the cancel did not apply.
-		return
-	case orderLivenessUnclear:
-		return
-	case orderFilledOut:
-		e.untrackOrder(id)
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	oid, still := e.orders[id]
+	if !still {
 		return
 	}
 	// The venue had nothing to cancel, so the caller's cancel is not how this
-	// order ended and must not be what it is reported under. Whatever the
-	// venue says retired it is the truthful answer; untracking clears the
-	// intent along with the order.
-	e.stateMu.Lock()
-	_, still := e.orders[id]
-	e.untrackOrderLocked(id)
-	e.stateMu.Unlock()
-	if still {
-		e.emitEvent(godex.OrderRejectedEvent{OrderID: id, Reason: reason})
-	}
+	// order ended and must not be what it is reported under.
+	delete(e.canceling, id)
+	e.settleOrderLocked(id, book.liveness(oid))
 }
 
 // submitAction serializes allocate-nonce → sign → POST under txMu so the
@@ -606,7 +615,7 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 	e.txMu.Lock()
 	defer e.txMu.Unlock()
 	if !e.acceptingTx {
-		return nil, "", fmt.Errorf("hyperliquid: executor is not accepting submissions: %w", godex.ErrNotConnected)
+		return nil, "", fmt.Errorf("txflow: executor is not accepting submissions: %w", godex.ErrNotConnected)
 	}
 	if err := e.assertTxCanStartLocked(ctx); err != nil {
 		return nil, "", err
@@ -618,17 +627,15 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 		return nil, "", err
 	}
 	request := exchangeRequest{Action: action, Nonce: nonce, Signature: sig}
-	if len(e.cfg.vaultAddress) != 0 {
-		request.VaultAddress = evmsign.NormalizeAddress(e.cfg.vaultAddress)
-	}
 
 	requestCtx, cancel := context.WithTimeout(e.lifecycleCtx, e.cfg.txRequestTimeout)
 	defer cancel()
 	statuses, failure, err := postExchange(requestCtx, e.cfg.httpClient, e.cfg.restBaseURL, request)
 	if err != nil {
-		if e.lifecycleCtx.Err() != nil {
-			return nil, "", fmt.Errorf("hyperliquid: submission lifecycle ended: %w", e.lifecycleCtx.Err())
-		}
+		// Once dispatched, the venue may have taken the action whatever cut
+		// the call short — a Close included. That is an unknown outcome and
+		// is reported as one; a fault latched during Close is never recovered
+		// (nothing runs after Close), which is why the caller must hear it.
 		return nil, "", e.latchTxFaultLocked(err, orderID)
 	}
 	return statuses, failure, nil
@@ -636,10 +643,10 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 
 func (e *Executor) assertTxCanStartLocked(ctx context.Context) error {
 	if err := e.lifecycleCtx.Err(); err != nil {
-		return fmt.Errorf("hyperliquid: submission lifecycle ended: %w", err)
+		return fmt.Errorf("txflow: submission lifecycle ended: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("hyperliquid: submission canceled before dispatch: %w", err)
+		return fmt.Errorf("txflow: submission canceled before dispatch: %w", err)
 	}
 	if e.txFault != nil {
 		return e.txFault
@@ -697,10 +704,15 @@ func (e *Executor) scheduleFaultRecoveryLocked() {
 	e.faultTimer = time.AfterFunc(e.cfg.txFaultRecoveryDelay, e.recoverTxFault)
 }
 
-// recoverTxFault asks the venue whether the ambiguous submission's order
-// exists. That answer — and not a retry — is what resolves the ambiguity: an
-// order the venue never took is untracked, one it holds stays tracked and
-// cancellable. Unreachable endpoints reschedule with backoff.
+// recoverTxFault settles the ambiguous submission from the venue's order
+// records. That answer — and not a retry — is what resolves the ambiguity: an
+// order the venue never took is untracked, one it holds is cancelled. An
+// order whose oid is already known is looked up by it; one that never got an
+// ack is looked for by what was submitted — market, side, price, size,
+// reduce-only — at or after the submission time, and if that search cannot
+// name exactly one order the fault stays latched: guessing here could cancel
+// someone else's order or leave this one resting. Unreachable endpoints
+// reschedule with backoff.
 func (e *Executor) recoverTxFault() {
 	e.txMu.Lock()
 	defer e.txMu.Unlock()
@@ -708,65 +720,74 @@ func (e *Executor) recoverTxFault() {
 	if e.txFault == nil || !e.acceptingTx || e.lifecycleCtx.Err() != nil {
 		return
 	}
+	reschedule := func() {
+		if e.acceptingTx && e.lifecycleCtx.Err() == nil {
+			e.scheduleFaultRecoveryLocked()
+		}
+	}
 
 	requestCtx, cancel := context.WithTimeout(e.lifecycleCtx, e.cfg.txRequestTimeout)
 	defer cancel()
 	orderID := e.txFaultOrderID
 	if orderID != "" {
-		known, err := e.orderExists(requestCtx, orderID)
+		book, err := e.readOrderBook(requestCtx)
 		if err != nil {
-			if e.acceptingTx && e.lifecycleCtx.Err() == nil {
-				e.scheduleFaultRecoveryLocked()
-			}
+			reschedule()
 			return
 		}
-		if known {
+		e.stateMu.Lock()
+		oid, tracked := e.orders[orderID]
+		submitted := e.submissions[orderID]
+		if tracked && oid == 0 {
+			var found bool
+			oid, found, err = book.findSubmission(e.cfg.market, submitted, e.oids)
+			if err != nil {
+				e.stateMu.Unlock()
+				e.logger.Error("txflow cannot attribute the submission left by an unknown outcome; "+
+					"submissions stay halted", "order_id", orderID, "error", err)
+				reschedule()
+				return
+			}
+			if found {
+				e.orders[orderID] = oid
+				e.oids.bind(oid, orderID)
+			}
+		}
+		e.stateMu.Unlock()
+
+		held := tracked && oid != 0 && book.liveness(oid).state == orderLive
+		if held {
 			// The caller never received an ack, so it does not know this
 			// order's id and cannot cancel it. Leaving it resting would be an
 			// exposure nobody can address; cancelling makes the venue agree
 			// with what the caller already believes. If it filled first, the
-			// account stream still reports that — cancelling is idempotent.
-			if err := e.cancelForRecoveryLocked(requestCtx, orderID); err != nil {
-				e.logger.Error("hyperliquid could not cancel the order left by an unknown outcome",
-					"order_id", orderID, "error", err)
-				if e.acceptingTx && e.lifecycleCtx.Err() == nil {
-					e.scheduleFaultRecoveryLocked()
-				}
+			// fill poll still reports that — cancelling is idempotent.
+			if err := e.cancelForRecoveryLocked(requestCtx, oid); err != nil {
+				e.logger.Error("txflow could not cancel the order left by an unknown outcome",
+					"order_id", orderID, "oid", oid, "error", err)
+				reschedule()
 				return
 			}
 		}
 		e.untrackOrder(orderID)
-		e.logger.Info("hyperliquid submission reconciled",
-			"order_id", orderID, "venue_held_order", known)
+		e.logger.Info("txflow submission reconciled",
+			"order_id", orderID, "venue_held_order", held)
 	} else if _, err := e.readAccount(requestCtx); err != nil {
-		if e.acceptingTx && e.lifecycleCtx.Err() == nil {
-			e.scheduleFaultRecoveryLocked()
-		}
+		reschedule()
 		return
 	}
 	e.txFault = nil
 	e.txFaultOrderID = ""
 }
 
-// orderExists reports whether the venue holds a record of the client order
-// id. "unknownOid" is a definitive no: the submission never landed.
-func (e *Executor) orderExists(ctx context.Context, orderID godex.OrderID) (bool, error) {
-	response, err := postJSON[orderQueryResponse](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
-		infoRequest{Type: infoTypeOrderStatus, User: e.cfg.userAddress, Oid: string(orderID)})
-	if err != nil {
-		return false, err
-	}
-	return *response.Status == queryStatusOrder, nil
-}
-
 // cancelForRecoveryLocked cancels an order the venue turned out to be holding
 // after an unknown outcome. It bypasses the fault latch deliberately: the
 // latch exists to stop *new* exposure, and this is the call that removes the
 // exposure already there. Callers hold txMu.
-func (e *Executor) cancelForRecoveryLocked(ctx context.Context, orderID godex.OrderID) error {
-	action := cancelByCloidAction{
-		Type:    actionTypeCancelByCloid,
-		Cancels: []cancelByCloidWire{{Asset: e.asset.index, Cloid: string(orderID)}},
+func (e *Executor) cancelForRecoveryLocked(ctx context.Context, oid int64) error {
+	action := cancelAction{
+		Type:    actionTypeCancel,
+		Cancels: []cancelWire{{Asset: e.asset.index, Oid: oid}},
 	}
 	nonce := e.nextNonceLocked()
 	sig, err := e.signer.signAction(action, nonce)
@@ -774,63 +795,175 @@ func (e *Executor) cancelForRecoveryLocked(ctx context.Context, orderID godex.Or
 		return err
 	}
 	request := exchangeRequest{Action: action, Nonce: nonce, Signature: sig}
-	if len(e.cfg.vaultAddress) != 0 {
-		request.VaultAddress = evmsign.NormalizeAddress(e.cfg.vaultAddress)
-	}
 	statuses, failure, err := postExchange(ctx, e.cfg.httpClient, e.cfg.restBaseURL, request)
 	if err != nil {
 		return err
 	}
 	if failure != "" {
-		return fmt.Errorf("hyperliquid: recovery cancel refused: %s", failure)
+		return fmt.Errorf("txflow: recovery cancel refused: %s", failure)
 	}
 	message, err := decodeCancelStatus(statuses)
 	if err != nil {
 		return err
 	}
 	if message != "" && !cancelAlreadyGonePattern.MatchString(message) {
-		return fmt.Errorf("hyperliquid: recovery cancel failed: %s", message)
+		return fmt.Errorf("txflow: recovery cancel failed: %s", message)
 	}
 	return nil
 }
 
-// orderLiveness is what the venue says about an order the executor tracks.
-type orderLiveness int
+// --- order reconciliation ---
+
+// orderLiveness is what the venue's records say about a tracked order.
+type orderLiveness struct {
+	state  livenessState
+	reason string
+}
+
+type livenessState int
 
 const (
 	// orderLive means the venue still holds the order on the book.
-	orderLive orderLiveness = iota
+	orderLive livenessState = iota
 	// orderFilledOut means it finished by filling, which closes it without
 	// being a rejection.
 	orderFilledOut
 	// orderClosed means it ended without filling in full.
 	orderClosed
-	// orderLivenessUnclear means the venue holds the order but did not report
-	// its lifecycle status, so the executor keeps tracking it rather than
-	// inventing an answer.
-	orderLivenessUnclear
 )
 
-// queryOrderLiveness asks the venue about one tracked order.
-func (e *Executor) queryOrderLiveness(ctx context.Context, orderID godex.OrderID) (orderLiveness, string, error) {
-	response, err := postJSON[orderQueryResponse](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
-		infoRequest{Type: infoTypeOrderStatus, User: e.cfg.userAddress, Oid: string(orderID)})
+// venueOrderBook is one reading of the venue's order records: which orders
+// rest on the book, and the last known status of every recent order. The
+// venue answers no per-order status query, so this pair is how a tracked
+// order's fate is looked up.
+type venueOrderBook struct {
+	open    map[int64]struct{}
+	history map[int64]*historicalOrderWire
+}
+
+func (e *Executor) readOrderBook(ctx context.Context) (*venueOrderBook, error) {
+	open, err := postJSON[openOrderList](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
+		infoRequest{Type: infoTypeOpenOrders, User: e.cfg.accountAddress})
 	if err != nil {
-		return orderLivenessUnclear, "", err
+		return nil, err
 	}
-	if *response.Status != queryStatusOrder {
-		return orderClosed, "the venue does not hold this order", nil
+	history, err := postJSON[historicalOrderList](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
+		infoRequest{Type: infoTypeHistoricalOrders, User: e.cfg.accountAddress})
+	if err != nil {
+		return nil, err
 	}
-	if response.Order == nil || response.Order.Status == nil {
-		return orderLivenessUnclear, "", nil
+	book := &venueOrderBook{
+		open:    make(map[int64]struct{}, len(*open)),
+		history: make(map[int64]*historicalOrderWire, len(*history)),
 	}
-	switch status := *response.Order.Status; status {
-	case orderStatusOpen, orderStatusTriggered:
-		return orderLive, "", nil
+	for _, order := range *open {
+		book.open[*order.Oid] = struct{}{}
+	}
+	for i := range *history {
+		order := (*history)[i].Order
+		book.history[*order.Oid] = order
+	}
+	return book, nil
+}
+
+// liveness classifies one oid. An order on the open list is live whatever
+// its history says; one that is neither open nor in the history is closed —
+// the venue holds no record to cancel or fill.
+func (b *venueOrderBook) liveness(oid int64) orderLiveness {
+	if _, open := b.open[oid]; open {
+		return orderLiveness{state: orderLive}
+	}
+	order, known := b.history[oid]
+	if !known {
+		return orderLiveness{state: orderClosed, reason: "the venue does not hold this order"}
+	}
+	switch status := *order.Status; status {
+	case orderStatusOpen, orderStatusPartialFilled, orderStatusTriggered:
+		return orderLiveness{state: orderLive}
 	case orderStatusFilled:
-		return orderFilledOut, "", nil
+		return orderLiveness{state: orderFilledOut}
 	default:
-		return orderClosed, status, nil
+		return orderLiveness{state: orderClosed, reason: status}
+	}
+}
+
+// findSubmission looks for the one order in the records that no tracked order
+// accounts for and that matches what was submitted — market, side, price,
+// size, reduce-only — at or after the submission time (widened by a clock
+// slack). It reports (oid, true, nil) for exactly one such order, (0, false,
+// nil) for none, and an error when several match, since none of them can
+// safely be claimed. Another process placing an identical order on the same
+// account inside the window would still be indistinguishable; that is a
+// residual risk of a venue with no client order id, and it is documented on
+// the package.
+func (b *venueOrderBook) findSubmission(market string, submitted submission, known *oidIndex) (int64, bool, error) {
+	since := submitted.at.Add(-recoveryClockSlack).UnixMilli()
+	wantSide := sideAsk
+	if submitted.wire.IsBuy {
+		wantSide = sideBid
+	}
+	wantPrice, err := decimal.FromDecimalString(submitted.wire.Price)
+	if err != nil {
+		return 0, false, fmt.Errorf("txflow: submitted price %q is malformed: %w", submitted.wire.Price, err)
+	}
+	wantSize, err := decimal.FromDecimalString(submitted.wire.Size)
+	if err != nil {
+		return 0, false, fmt.Errorf("txflow: submitted size %q is malformed: %w", submitted.wire.Size, err)
+	}
+	var (
+		found      int64
+		candidates int
+	)
+	for oid, order := range b.history {
+		if *order.Symbol != market || *order.Timestamp < since {
+			continue
+		}
+		if _, tracked := known.lookup(oid); tracked {
+			continue
+		}
+		if *order.Side != wantSide || *order.ReduceOnly != submitted.wire.ReduceOnly {
+			continue
+		}
+		price, err := decimal.FromDecimalString(*order.LimitPx)
+		if err != nil {
+			return 0, false, fmt.Errorf("txflow: historicalOrders oid %d has malformed limitPx: %w", oid, err)
+		}
+		size, err := decimal.FromDecimalString(*order.OrigSz)
+		if err != nil {
+			return 0, false, fmt.Errorf("txflow: historicalOrders oid %d has malformed origSz: %w", oid, err)
+		}
+		if price.Cmp(wantPrice) != 0 || size.Cmp(wantSize) != 0 {
+			continue
+		}
+		found = oid
+		candidates++
+	}
+	switch candidates {
+	case 0:
+		return 0, false, nil
+	case 1:
+		return found, true, nil
+	default:
+		return 0, false, fmt.Errorf("txflow: %d orders on %s match the ambiguous submission", candidates, market)
+	}
+}
+
+// settleOrderLocked applies what the venue's records say about a tracked
+// order: a live one stays tracked, a filled one is retired silently (its
+// fill is reported by the poll), and a closed one is retired with a
+// rejection under the caller's reason if a cancel was requested. Callers
+// hold stateMu.
+func (e *Executor) settleOrderLocked(id godex.OrderID, liveness orderLiveness) {
+	switch liveness.state {
+	case orderLive:
+		return
+	case orderFilledOut:
+		e.untrackOrderLocked(id)
+	case orderClosed:
+		// Read before untracking, which clears the cancel intent.
+		reason := e.terminalReasonLocked(id, liveness.reason)
+		e.untrackOrderLocked(id)
+		e.send(godex.OrderRejectedEvent{OrderID: id, Reason: reason})
 	}
 }
 
@@ -845,120 +978,63 @@ func (e *Executor) reconcileOrdersAsync() {
 	}()
 }
 
-// reconcileTrackedOrders asks the venue about every order this executor still
-// believes is live. orderUpdates is push-only and never replayed, so an order
-// cancelled while the socket was down would otherwise stay tracked forever and
-// its OrderRejectedEvent would never arrive.
+// reconcileTrackedOrders checks every order this executor still believes is
+// live against the venue's records. orderUpdates is push-only and never
+// replayed, so an order cancelled while the socket was down would otherwise
+// stay tracked forever and its OrderRejectedEvent would never arrive.
 func (e *Executor) reconcileTrackedOrders(ctx context.Context) {
+	book, err := e.readOrderBook(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			e.logger.Error("txflow order reconciliation failed", "error", err)
+		}
+		return
+	}
 	e.stateMu.Lock()
-	tracked := make([]godex.OrderID, 0, len(e.orders))
-	for id := range e.orders {
-		tracked = append(tracked, id)
+	defer e.stateMu.Unlock()
+	if !e.connOpen {
+		// A reading that outlived its connection would publish outside a
+		// Connected/Disconnected window; the next connection re-reads.
+		return
 	}
-	e.stateMu.Unlock()
-
-	for _, orderID := range tracked {
-		liveness, reason, err := e.queryOrderLiveness(ctx, orderID)
-		if err != nil {
-			if ctx.Err() == nil {
-				e.logger.Error("hyperliquid order reconciliation failed",
-					"order_id", orderID, "error", err)
-			}
-			return
+	for id, oid := range e.orders {
+		if oid == 0 {
+			continue // an ambiguous submission; recovery owns it
 		}
-		if liveness == orderLive || liveness == orderLivenessUnclear {
-			continue
-		}
-		e.stateMu.Lock()
-		if _, still := e.orders[orderID]; still {
-			// Read before untracking, which clears the cancel intent.
-			terminalReason := e.terminalReasonLocked(orderID, reason)
-			e.untrackOrderLocked(orderID)
-			if liveness == orderClosed {
-				e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: terminalReason})
-			}
-		}
-		e.stateMu.Unlock()
+		e.settleOrderLocked(id, book.liveness(oid))
 	}
 }
 
-// awaitFillSnapshot blocks until the venue's opening userFills snapshot has
-// been absorbed. Until then the executor cannot tell an account's history from
-// its own executions, so accepting an order first risks suppressing its fill.
-func (e *Executor) awaitFillSnapshot(ctx context.Context) error {
-	timeout := time.NewTimer(e.cfg.fillSnapshotTimeout)
-	defer timeout.Stop()
-	select {
-	case <-e.fillSnapshotReady:
-		return nil
-	case <-ctx.Done():
-		return fmt.Errorf("hyperliquid: canceled awaiting the initial fill snapshot: %w", ctx.Err())
-	case <-e.lifecycleCtx.Done():
-		return godex.ErrClosed
-	case <-timeout.C:
-		return fmt.Errorf("hyperliquid: no userFills snapshot arrived within %s", e.cfg.fillSnapshotTimeout)
-	}
-}
-
-// assertCrossMargin verifies the account's margin mode for the traded coin.
-// clearinghouseState omits coins the account is flat in, so a flat account's
-// mode is invisible there; activeAssetData reports it either way. An order
-// action carries no margin mode, so an account left in isolated mode would
-// open a position this adapter's whole-account liquidation math cannot
-// describe.
+// assertCrossMargin verifies the account's margin mode for the traded market.
+// clearinghouseState omits markets the account is flat in, so a flat
+// account's mode is invisible there; activeAssetData reports it either way.
 func (e *Executor) assertCrossMargin(ctx context.Context) error {
 	response, err := postJSON[activeAssetDataResponse](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
-		infoRequest{Type: infoTypeActiveAssetData, User: e.cfg.userAddress, Coin: e.cfg.coin})
+		infoRequest{Type: infoTypeActiveAssetData, User: e.cfg.accountAddress, Coin: e.coinParam()})
 	if err != nil {
 		return err
 	}
 	if *response.Leverage.Type != leverageTypeCross {
-		return fmt.Errorf("hyperliquid: %s is set to %q margin on this account; only cross is supported",
-			e.cfg.coin, *response.Leverage.Type)
+		return fmt.Errorf("txflow: %s is set to %q margin on this account; only cross is supported",
+			e.cfg.market, *response.Leverage.Type)
 	}
 	return nil
 }
 
-// warnIfAgentUnlisted reports a signing key that is not a listed agent of the
-// account. It warns rather than fails: the venue also has a single unnamed
-// agent slot that this listing does not cover, so refusing here would reject
-// working configurations. A genuinely wrong key still fails at the first
-// order — this only makes that outcome predictable at connect time.
-func (e *Executor) warnIfAgentUnlisted(ctx context.Context, agentAddress string) {
-	if agentAddress == e.cfg.accountAddress {
-		return // the account signs for itself
-	}
-	agents, err := postJSON[extraAgentList](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
-		infoRequest{Type: infoTypeExtraAgents, User: e.cfg.accountAddress})
-	if err != nil {
-		e.logger.Warn("hyperliquid could not list the account's agents", "error", err)
-		return
-	}
-	for _, agent := range *agents {
-		if strings.EqualFold(*agent.Address, agentAddress) {
-			return
-		}
-	}
-	e.logger.Warn("hyperliquid signing key is not a listed agent for the account; "+
-		"this is expected for the venue's unnamed agent slot, but a mismatched key will "+
-		"only be refused at the first order",
-		"agent_address", agentAddress, "account", e.cfg.accountAddress)
-}
-
-// newClientOrderID mints the 128-bit client order id an order is submitted
-// under. It is assigned before submission so an ambiguous outcome still has a
-// handle to reconcile and cancel by.
+// newClientOrderID mints the 128-bit id an order is tracked under. It is
+// assigned before submission so an ambiguous outcome still has a handle.
 func newClientOrderID() (godex.OrderID, error) {
 	var raw [16]byte
 	if _, err := rand.Read(raw[:]); err != nil {
-		return "", fmt.Errorf("hyperliquid: generating a client order id failed: %w", err)
+		return "", fmt.Errorf("txflow: generating a client order id failed: %w", err)
 	}
 	return godex.OrderID("0x" + hex.EncodeToString(raw[:])), nil
 }
 
-func (e *Executor) trackOrder(id godex.OrderID) {
+func (e *Executor) trackOrder(id godex.OrderID, wire orderWire) {
 	e.stateMu.Lock()
 	e.orders[id] = 0
+	e.submissions[id] = submission{wire: wire, at: e.cfg.now()}
 	e.stateMu.Unlock()
 }
 
@@ -966,9 +1042,46 @@ func (e *Executor) bindOrderOid(id godex.OrderID, oid int64) {
 	e.stateMu.Lock()
 	if _, tracked := e.orders[id]; tracked {
 		e.orders[id] = oid
-		e.ordersByOid[oid] = id
+	}
+	// Bound even for an order no longer tracked: its fills still need a
+	// name.
+	e.oids.bind(oid, id)
+	filled := false
+	if status, orphaned := e.orphanStatuses[oid]; orphaned {
+		delete(e.orphanStatuses, oid)
+		filled = e.applyOrderStatusLocked(id, status)
 	}
 	e.stateMu.Unlock()
+	if filled {
+		e.triggerFillPoll()
+	}
+}
+
+// applyOrderStatusLocked applies one order update to a tracked order and
+// reports whether it filled. Callers hold stateMu.
+func (e *Executor) applyOrderStatusLocked(orderID godex.OrderID, status string) bool {
+	if _, tracked := e.orders[orderID]; !tracked {
+		return false
+	}
+	switch status {
+	case orderStatusOpen, orderStatusPartialFilled, orderStatusTriggered:
+		// Still live.
+		return false
+	case orderStatusFilled:
+		// It filled, so a cancel accepted for it applied to nothing and
+		// must not be reported as having ended it. The execution comes
+		// from the fill poll.
+		e.untrackOrderLocked(orderID)
+		return true
+	default:
+		// Every remaining status ends the order without filling it in
+		// full; validate() has already rejected anything unrecognized.
+		// The reason is read before untracking, which clears the intent.
+		reason := e.terminalReasonLocked(orderID, status)
+		e.untrackOrderLocked(orderID)
+		e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: reason})
+		return false
+	}
 }
 
 func (e *Executor) untrackOrder(id godex.OrderID) {
@@ -978,12 +1091,8 @@ func (e *Executor) untrackOrder(id godex.OrderID) {
 }
 
 func (e *Executor) untrackOrderLocked(id godex.OrderID) {
-	if oid, tracked := e.orders[id]; tracked {
-		if oid != 0 {
-			delete(e.ordersByOid, oid)
-		}
-		delete(e.orders, id)
-	}
+	delete(e.orders, id)
+	delete(e.submissions, id)
 	delete(e.canceling, id)
 }
 
@@ -1003,11 +1112,11 @@ func (e *Executor) terminalReasonLocked(id godex.OrderID, venueReason string) st
 // count means the response does not describe the submission.
 func decodeOrderStatus(statuses []json.RawMessage) (*orderStatusWire, error) {
 	if len(statuses) != 1 {
-		return nil, fmt.Errorf("hyperliquid: order response carried %d statuses, want 1", len(statuses))
+		return nil, fmt.Errorf("txflow: order response carried %d statuses, want 1", len(statuses))
 	}
 	var status orderStatusWire
 	if err := json.Unmarshal(statuses[0], &status); err != nil {
-		return nil, fmt.Errorf("hyperliquid: order status is malformed: %w", err)
+		return nil, fmt.Errorf("txflow: order status is malformed: %w", err)
 	}
 	if err := status.validate(); err != nil {
 		return nil, err
@@ -1020,18 +1129,18 @@ func decodeOrderStatus(statuses []json.RawMessage) (*orderStatusWire, error) {
 // or with an object carrying an error.
 func decodeCancelStatus(statuses []json.RawMessage) (string, error) {
 	if len(statuses) != 1 {
-		return "", fmt.Errorf("hyperliquid: cancel response carried %d statuses, want 1", len(statuses))
+		return "", fmt.Errorf("txflow: cancel response carried %d statuses, want 1", len(statuses))
 	}
 	var text string
 	if err := json.Unmarshal(statuses[0], &text); err == nil {
 		if text != "success" {
-			return "", fmt.Errorf("hyperliquid: cancel returned unknown status %q", text)
+			return "", fmt.Errorf("txflow: cancel returned unknown status %q", text)
 		}
 		return "", nil
 	}
 	var status orderStatusWire
 	if err := json.Unmarshal(statuses[0], &status); err != nil {
-		return "", fmt.Errorf("hyperliquid: cancel status is malformed: %w", err)
+		return "", fmt.Errorf("txflow: cancel status is malformed: %w", err)
 	}
 	if err := status.validate(); err != nil {
 		return "", err
@@ -1042,7 +1151,7 @@ func decodeCancelStatus(statuses []json.RawMessage) (string, error) {
 	case status.Success != nil:
 		return "", nil
 	default:
-		return "", fmt.Errorf("hyperliquid: cancel status carried no recognized outcome")
+		return "", fmt.Errorf("txflow: cancel status carried no recognized outcome")
 	}
 }
 
@@ -1056,36 +1165,38 @@ func (e *Executor) handleSocketOpen() error {
 	e.stateMu.Unlock()
 
 	// Connected is emitted before subscribing, not after: the socket's read
-	// loop is already running by the time this hook is called, so a snapshot
-	// answering the first subscription can be handled while the second is
-	// still being sent. Announcing the connection first is what keeps those
-	// fills inside the Connected/Disconnected window the contract promises.
-	e.emitEvent(godex.ConnectedEvent{VenueID: godex.VenueHyperliquid})
+	// loop is already running by the time this hook is called, so an update
+	// answering the subscription could otherwise be handled first. Announcing
+	// the connection first is what keeps it inside the Connected/Disconnected
+	// window the contract promises.
+	e.emitEvent(godex.ConnectedEvent{VenueID: godex.VenueTxFlow})
 
-	for _, subscription := range []string{channelUserFills, channelOrderUpdates} {
-		if err := e.sendSubscribe(subscription); err != nil {
-			return err
-		}
+	if err := e.sendSubscribe(channelOrderUpdates); err != nil {
+		return err
 	}
 
 	if reconnected {
-		// Position and margin are read rather than pushed, so a reconnect
-		// re-converges from a fresh snapshot instead of waiting for the next
-		// poll tick. Orders are reconciled for a different reason: their
+		// Position, margin and fills are read rather than pushed, so a
+		// reconnect re-converges from fresh reads instead of waiting for the
+		// next poll ticks. Orders are reconciled for a different reason: their
 		// updates are push-only, so a cancellation that happened while the
 		// socket was down is never replayed.
 		e.refreshAccountAsync()
 		e.reconcileOrdersAsync()
+		e.triggerFillPoll()
 	}
 	return nil
 }
 
+// sendSubscribe sends the venue's subscription envelope, which names the
+// channel twice: once beside the method and once inside the subscription.
 func (e *Executor) sendSubscribe(channel string) error {
 	message, err := json.Marshal(map[string]any{
 		"method": "subscribe",
+		"type":   channel,
 		"subscription": map[string]string{
 			"type": channel,
-			"user": e.cfg.userAddress,
+			"user": e.cfg.accountAddress,
 		},
 	})
 	if err != nil {
@@ -1098,92 +1209,39 @@ func (e *Executor) handleSocketDown() {
 	e.stateMu.Lock()
 	e.connOpen = false
 	e.stateMu.Unlock()
-	e.emitEvent(godex.DisconnectedEvent{VenueID: godex.VenueHyperliquid})
+	e.emitEvent(godex.DisconnectedEvent{VenueID: godex.VenueTxFlow})
 }
 
 func (e *Executor) handleSocketMessage(raw []byte) error {
 	var envelope wsEnvelope
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return fmt.Errorf("hyperliquid: ws message is malformed JSON: %w", err)
+		return fmt.Errorf("txflow: ws message is malformed JSON: %w", err)
 	}
 	if err := envelope.validate(); err != nil {
 		return err
 	}
+	if envelope.Channel == nil {
+		if *envelope.Method == wsMethodPong {
+			return nil
+		}
+		return fmt.Errorf("txflow: ws message with unexpected method %q", *envelope.Method)
+	}
 	switch *envelope.Channel {
-	case channelPong, channelSubscriptionResponse:
+	case channelSubscriptionResponse:
 		return nil
 	case channelError:
-		return fmt.Errorf("hyperliquid: ws error notice: %s", truncate(envelope.Data))
-	case channelUserFills:
-		return e.handleUserFills(envelope.Data)
+		return fmt.Errorf("txflow: ws error notice: %s", truncate(envelope.Data))
 	case channelOrderUpdates:
 		return e.handleOrderUpdates(envelope.Data)
 	default:
-		return fmt.Errorf("hyperliquid: ws message on unexpected channel %q", *envelope.Channel)
+		return fmt.Errorf("txflow: ws message on unexpected channel %q", *envelope.Channel)
 	}
-}
-
-func (e *Executor) handleUserFills(data []byte) error {
-	var payload wsUserFills
-	if err := json.Unmarshal(data, &payload); err != nil {
-		return fmt.Errorf("hyperliquid: userFills payload is malformed: %w", err)
-	}
-	if err := payload.validate(); err != nil {
-		return err
-	}
-
-	ctx := e.normalizeContext()
-	events := make([]godex.AccountEvent, 0, len(*payload.Fills))
-
-	e.stateMu.Lock()
-	// Only a snapshot can be history, and only the first one is history this
-	// executor did not do. Live updates are never suppressed, so a venue that
-	// sends no snapshot at all still delivers every fill.
-	isSnapshot := payload.IsSnapshot != nil && *payload.IsSnapshot
-	seeding := isSnapshot && !e.fillHistorySeeded
-	if isSnapshot {
-		e.fillHistorySeeded = true
-	}
-	for i := range *payload.Fills {
-		fill := &(*payload.Fills)[i]
-		// Normalization runs before the trade id is remembered. A fill that
-		// fails to normalize aborts the connection, and the snapshot that
-		// follows the reconnect is the only chance to see it again — marking
-		// it seen first would drop it silently on that second pass.
-		event, err := normalizeFill(fill, ctx)
-		if err != nil {
-			e.stateMu.Unlock()
-			return err
-		}
-		if event == nil {
-			continue // a coin this executor does not manage
-		}
-		if !e.fills.observe(*fill.Tid) || seeding {
-			continue
-		}
-		events = append(events, *event)
-	}
-	for _, event := range events {
-		e.send(event)
-	}
-	e.stateMu.Unlock()
-
-	if isSnapshot {
-		e.fillSnapshotOnce.Do(func() { close(e.fillSnapshotReady) })
-	}
-
-	if len(events) > 0 {
-		// A fill moved the position; read the new one rather than waiting
-		// for the next poll tick.
-		e.refreshAccountAsync()
-	}
-	return nil
 }
 
 func (e *Executor) handleOrderUpdates(data []byte) error {
 	var updates []wsOrderUpdate
 	if err := json.Unmarshal(data, &updates); err != nil {
-		return fmt.Errorf("hyperliquid: orderUpdates payload is malformed: %w", err)
+		return fmt.Errorf("txflow: orderUpdates payload is malformed: %w", err)
 	}
 	for i := range updates {
 		if err := updates[i].validate(); err != nil {
@@ -1191,47 +1249,156 @@ func (e *Executor) handleOrderUpdates(data []byte) error {
 		}
 	}
 
+	filled := false
 	e.stateMu.Lock()
-	defer e.stateMu.Unlock()
 	for i := range updates {
 		update := &updates[i]
-		if *update.Order.Coin != e.cfg.coin {
+		oid := *update.Order.Oid
+		orderID, known := e.oids.lookup(oid)
+		if !known {
+			e.rememberOrphanLocked(oid, *update.Status)
 			continue
 		}
-		orderID, tracked := e.resolveOrderIDLocked(update)
-		if !tracked {
-			continue
+		if e.applyOrderStatusLocked(orderID, *update.Status) {
+			filled = true
 		}
-		switch *update.Status {
-		case orderStatusOpen, orderStatusTriggered:
-			// Still live.
-		case orderStatusFilled:
-			// It filled, so a cancel accepted for it applied to nothing and
-			// must not be reported as having ended it.
-			e.untrackOrderLocked(orderID)
-		default:
-			// Every remaining status ends the order without filling it in
-			// full; validate() has already rejected anything unrecognized.
-			// The reason is read before untracking, which clears the intent.
-			reason := e.terminalReasonLocked(orderID, *update.Status)
-			e.untrackOrderLocked(orderID)
-			e.send(godex.OrderRejectedEvent{OrderID: orderID, Reason: reason})
-		}
+	}
+	e.stateMu.Unlock()
+	if filled {
+		e.triggerFillPoll()
 	}
 	return nil
 }
 
-// resolveOrderIDLocked maps an order update onto an executor order id, by
-// client order id when the venue echoes one and by venue oid otherwise.
-func (e *Executor) resolveOrderIDLocked(update *wsOrderUpdate) (godex.OrderID, bool) {
-	if update.Order.Cloid != nil {
-		orderID := godex.OrderID(*update.Order.Cloid)
-		if _, tracked := e.orders[orderID]; tracked {
-			return orderID, true
+// orphanStatusCapacity bounds the remembered updates for unbound oids. Almost
+// all of them belong to orders this executor did not place (another process
+// on the account) and are never claimed; the map is reset rather than grown.
+const orphanStatusCapacity = 1024
+
+// rememberOrphanLocked keeps the latest status seen for an oid no order is
+// bound to yet. Callers hold stateMu.
+func (e *Executor) rememberOrphanLocked(oid int64, status string) {
+	if len(e.orphanStatuses) >= orphanStatusCapacity {
+		e.orphanStatuses = make(map[int64]string, orphanStatusCapacity)
+	}
+	e.orphanStatuses[oid] = status
+}
+
+// --- fills ---
+
+// seedFillHistory absorbs the account's existing executions so the first
+// poll does not publish them as this executor's work.
+func (e *Executor) seedFillHistory(ctx context.Context) error {
+	fills, err := e.readFills(ctx)
+	if err != nil {
+		return err
+	}
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if e.fillHistorySeeded {
+		return nil
+	}
+	for i := range *fills {
+		e.fills.Observe(*(*fills)[i].Tid)
+	}
+	e.fillHistorySeeded = true
+	return nil
+}
+
+func (e *Executor) readFills(ctx context.Context) (*fillList, error) {
+	return postJSON[fillList](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
+		infoRequest{Type: infoTypeUserFills, User: e.cfg.accountAddress})
+}
+
+// pollFills reads the account's recent executions and publishes the ones not
+// yet seen. It reports whether anything was published.
+func (e *Executor) pollFills(ctx context.Context) (bool, error) {
+	fills, err := e.readFills(ctx)
+	if err != nil {
+		return false, err
+	}
+	nctx := e.normalizeContext()
+
+	e.stateMu.Lock()
+	defer e.stateMu.Unlock()
+	if !e.connOpen {
+		// Fills are account events and belong inside a Connected window. A
+		// read that landed while the socket is down is left for the next
+		// poll, which will see the same executions again.
+		return false, nil
+	}
+	// While a submission's oid is still unknown — its response in flight, or
+	// lost and awaiting recovery — a fill under an oid this executor does not
+	// recognize may be that order's. Publishing it now would name no order
+	// and spend its trade id, so it waits for a poll after the oid is bound.
+	bindPending := false
+	for _, oid := range e.orders {
+		if oid == 0 {
+			bindPending = true
+			break
 		}
 	}
-	orderID, tracked := e.ordersByOid[*update.Order.Oid]
-	return orderID, tracked
+	published := false
+	for i := range *fills {
+		fill := &(*fills)[i]
+		// Normalization runs before the trade id is remembered. A fill that
+		// fails to normalize aborts nothing but is left unseen, so the next
+		// poll — and the log — get another look at it.
+		orderID, known := e.oids.lookup(*fill.Oid)
+		if !known && bindPending {
+			continue
+		}
+		event, err := normalizeFill(fill, orderID, nctx)
+		if err != nil {
+			return published, err
+		}
+		if event == nil {
+			continue // a market this executor does not manage
+		}
+		if !e.fills.Observe(*fill.Tid) {
+			continue
+		}
+		e.send(*event)
+		published = true
+	}
+	return published, nil
+}
+
+// triggerFillPoll wakes the fill poller ahead of its next tick.
+func (e *Executor) triggerFillPoll() {
+	select {
+	case e.fillPollTrigger <- struct{}{}:
+	default:
+	}
+}
+
+// fillPollLoop is the executor's only source of executions: the venue has no
+// fills stream. Every tick reads the account's recent fills; the dedupe cache
+// makes each execution publish exactly once.
+func (e *Executor) fillPollLoop() {
+	defer e.pollerWG.Done()
+	ticker := time.NewTicker(e.cfg.fillPollInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-e.lifecycleCtx.Done():
+			return
+		case <-ticker.C:
+		case <-e.fillPollTrigger:
+		}
+		if !e.socket.IsOpen() {
+			continue
+		}
+		published, err := e.pollFills(e.lifecycleCtx)
+		if err != nil && e.lifecycleCtx.Err() == nil {
+			e.logger.Error("txflow fill poll failed", "error", err)
+		}
+		if published {
+			// A fill moved the position; read the new one rather than
+			// waiting for the next account poll tick.
+			e.refreshAccountAsync()
+		}
+	}
 }
 
 // --- account state ---
@@ -1245,7 +1412,7 @@ func (e *Executor) refreshAccountAsync() {
 	go func() {
 		defer e.endOp()
 		if _, err := e.refreshAccount(e.lifecycleCtx); err != nil && e.lifecycleCtx.Err() == nil {
-			e.logger.Error("hyperliquid account refresh failed", "error", err)
+			e.logger.Error("txflow account refresh failed", "error", err)
 		}
 	}()
 }
@@ -1253,7 +1420,7 @@ func (e *Executor) refreshAccountAsync() {
 // readAccount fetches the clearinghouse snapshot without interpreting it.
 func (e *Executor) readAccount(ctx context.Context) (*clearinghouseState, error) {
 	return postJSON[clearinghouseState](ctx, e.cfg.httpClient, e.cfg.restBaseURL,
-		infoRequest{Type: infoTypeClearinghouseState, User: e.cfg.userAddress})
+		infoRequest{Type: infoTypeClearinghouseState, User: e.cfg.accountAddress})
 }
 
 // refreshAccount reads the clearinghouse snapshot and emits position and
@@ -1345,7 +1512,7 @@ func (e *Executor) nextObservationSeqLocked() int64 {
 func (e *Executor) normalizeContext() normalizeContext {
 	return normalizeContext{
 		symbol:     e.cfg.symbol,
-		coin:       e.cfg.coin,
+		market:     e.cfg.market,
 		receivedAt: e.cfg.now(),
 	}
 }
@@ -1387,7 +1554,7 @@ func (e *Executor) accountPollLoop() {
 			// Poll failures are transient I/O; freshness monitoring is the
 			// risk layer's responsibility.
 			if _, err := e.refreshAccount(e.lifecycleCtx); err != nil && e.lifecycleCtx.Err() == nil {
-				e.logger.Error("hyperliquid account poll failed", "error", err)
+				e.logger.Error("txflow account poll failed", "error", err)
 			}
 		}
 	}

@@ -4,10 +4,10 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/DaisukeYoda/godex"
+	"github.com/DaisukeYoda/godex/internal/evmsign"
 )
 
 // Network selects the venue deployment. There is no default: the caller must
@@ -158,8 +158,8 @@ func (c Config) resolve() (*resolvedConfig, error) {
 		credentials:          c.Credentials,
 		symbol:               c.Symbol,
 		coin:                 c.Coin,
-		accountAddress:       normalizeAddress(accountAddress),
-		userAddress:          normalizeAddress(accountAddress),
+		accountAddress:       evmsign.NormalizeAddress(accountAddress),
+		userAddress:          evmsign.NormalizeAddress(accountAddress),
 		restBaseURL:          c.RESTBaseURL,
 		wsURL:                c.WSURL,
 		signingSource:        c.SigningSource,
@@ -179,7 +179,7 @@ func (c Config) resolve() (*resolvedConfig, error) {
 			return nil, err
 		}
 		resolved.vaultAddress = vault
-		resolved.userAddress = normalizeAddress(vault)
+		resolved.userAddress = evmsign.NormalizeAddress(vault)
 	}
 	if resolved.restBaseURL == "" {
 		resolved.restBaseURL, _ = c.Network.RESTBaseURL()
@@ -235,18 +235,4 @@ func (c Config) resolve() (*resolvedConfig, error) {
 		}
 	}
 	return resolved, nil
-}
-
-// normalizeAddress renders address bytes in the lowercase 0x form the venue
-// echoes back, so equality checks against streamed payloads are exact rather
-// than case-sensitive comparisons of user input.
-func normalizeAddress(address []byte) string {
-	var builder strings.Builder
-	builder.WriteString("0x")
-	const hexDigits = "0123456789abcdef"
-	for _, value := range address {
-		builder.WriteByte(hexDigits[value>>4])
-		builder.WriteByte(hexDigits[value&0x0f])
-	}
-	return builder.String()
 }

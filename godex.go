@@ -26,6 +26,8 @@ const (
 	VenueDydx VenueID = "dydx"
 	// VenueHyperliquid is the Hyperliquid venue.
 	VenueHyperliquid VenueID = "hyperliquid"
+	// VenueTxFlow is the TxFlow venue.
+	VenueTxFlow VenueID = "txflow"
 )
 
 // ExecutionMetadata is venue market metadata resolved during Connect.

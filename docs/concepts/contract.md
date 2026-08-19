@@ -1,7 +1,7 @@
 # The Venue Contract
 
 `VenueExecutor` is the single interface godex uses to speak to a perpetual
-DEX — Lighter, dYdX v4, or Hyperliquid. One implementation of it exists per
+DEX — Lighter, dYdX v4, Hyperliquid, or TxFlow. One implementation of it exists per
 venue, and each instance is scoped to exactly one market: authenticated order
 placement, cancellation, and account-state observation all happen behind it,
 with the venue's own wire protocol, signing scheme, and quirks kept entirely
@@ -29,7 +29,7 @@ type VenueExecutor interface {
 
 ## Design invariants
 
-Every adapter — Lighter, dYdX v4, Hyperliquid — upholds the following. This
+Every adapter — Lighter, dYdX v4, Hyperliquid, TxFlow — upholds the following. This
 page is the canonical, detailed reference for them; treat it as complete.
 
 ### Maker orders are post-only
@@ -121,3 +121,26 @@ termination, not left implicit.
     This eliminates an entire class of rounding and representation bugs
     from price and size arithmetic; any conversion at the boundary of the
     library must go through `decimal`, never through a native float.
+
+## How the contract is verified
+
+The clauses above are not only prose. `internal/conformance` holds one test
+per shared clause, and every adapter runs the same suite against its own fake
+venue, under the same clause names:
+
+```
+go test ./lighter/ ./dydx/ ./hyperliquid/ ./txflow/ -run TestConformance -v
+```
+
+An adapter supplies only a small harness — a connected executor, the order to
+place, and the handful of things a clause needs to make its venue act (force a
+reconnect, report an order ended, report an execution). A clause that does not
+run there is declared with its reason, and the reason says which kind it is:
+
+- `VENUE:` a limitation of the venue itself, which no adapter work would
+  remove. Lighter's account stream reports only post-only cancellations and it
+  has no order-status query, so two clauses genuinely cannot be driven there.
+- `GAP:` unfinished work in the adapter, which is a bug.
+
+Skips are printed by `go test -v`, so the venues a clause does *not* hold for
+are readable off a test run rather than inferred from an absent test.

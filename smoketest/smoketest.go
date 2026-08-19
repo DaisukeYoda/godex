@@ -3,7 +3,8 @@
 // once every gate passes:
 //
 //  1. connect: metadata, connected event, and a verified account snapshot
-//  2. far post-only order accepted, then canceled by executor-scoped ID
+//  2. far post-only order accepted, then canceled by executor-scoped ID and
+//     reported ended by the account stream
 //  3. crossing post-only rejected as a normal-path outcome (never an error)
 //  4. IOC executes: fill event then long position observed
 //  5. optional reconnect check while holding the position: disconnect and
@@ -69,6 +70,11 @@ type Config struct {
 	ForceReconnect func() error
 	// WaitFill enables the natural near-touch maker fill gate.
 	WaitFill bool
+	// CancelUnobservable relaxes gate 2 to the cancel being accepted, for a
+	// venue whose account stream never reports a caller's cancel (Lighter).
+	// Everywhere else the gate waits for the order to be reported ended: an
+	// accepted cancel is not evidence the order left the book.
+	CancelUnobservable bool
 
 	// EventTimeout, NaturalFillTimeout, and FarOrderRest override the
 	// defaults when positive.
@@ -149,7 +155,9 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 	}
 	cfg.Logf("TOB: bid=%s ask=%s", tob.BestBid, tob.BestAsk)
 
-	// Gate 2: far post-only accepted, then canceled.
+	// Gate 2: far post-only accepted, then canceled — and, unless the venue
+	// cannot report it, seen to end.
+	farMark := collector.Mark()
 	farAck, err := exec.PlaceOrder(ctx, godex.NewOrder{
 		Symbol: cfg.Symbol,
 		Side:   godex.SideBuy,
@@ -170,6 +178,12 @@ func Run(ctx context.Context, exec godex.VenueExecutor, cfg Config) error {
 	}
 	if err := exec.CancelOrder(ctx, farAck.OrderID); err != nil {
 		return fmt.Errorf("smoketest: cancel far post-only: %w", err)
+	}
+	if !cfg.CancelUnobservable {
+		if _, err := collector.WaitFor(ctx, farMark, cfg.EventTimeout, "far post-only reported ended",
+			isOrderRejectedFor(farAck.OrderID)); err != nil {
+			return err
+		}
 	}
 	pass("far post-only + cancel")
 

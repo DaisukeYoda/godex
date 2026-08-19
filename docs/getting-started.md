@@ -139,6 +139,49 @@ the same `godex.VenueExecutor` contract — `Connect`, `PlaceOrder`,
     which is a single ratio, carries the strictest tier rather than the
     headline one.
 
+=== "TxFlow"
+
+    ```go
+    exec, err := txflow.New(txflow.Config{
+        Credentials: txflow.Credentials{
+            AccountAddress: os.Getenv("TXFLOW_ACCOUNT_ADDRESS"), // 0x...
+            APIPrivateKey:  os.Getenv("TXFLOW_API_PRIVATE_KEY"), // trading (agent) wallet key
+        },
+        Symbol:  "ETH-PERP",
+        Market:  "ETH-USDC", // venue perp name, as listed by perpMeta
+        Network: txflow.Mainnet,
+        // The venue publishes tiered, per-market maintenance rates but exposes
+        // no schedule the adapter can read: pass the market's strictest tier.
+        MaintenanceMarginFraction: decimal.MustFromString("0.025", 3),
+    })
+    ```
+
+    TxFlow's API descends from Hyperliquid's, and so does the adapter:
+    orders are signed as L1 actions under an EIP-712 `Agent` struct that
+    also names the network, chain id and API version (`internal/evmsign`
+    holds the primitives both adapters share). What differs shapes the
+    executor. Fills are not streamed — they are read by polling the
+    `userFills` query, deduplicated by trade id, and attributed to orders by
+    the venue oid the placing response returned, since the venue's client
+    sends no client order id. Cancels are keyed by that oid; an ambiguous
+    submission, which never got one, is recovered by matching the account's
+    order history — market, side, price, size, reduce-only, at or after the
+    submission time — and cancelling the one order it can be, or halting if
+    it cannot name exactly one. Fills under an oid the executor does not
+    recognize are held while any submission's oid is still unknown, so an
+    execution that lands before its placing response is attributed rather
+    than published nameless. Position and margin
+    are read from clearinghouse snapshots; tracked orders are re-checked
+    against `openOrders`/`historicalOrders` after a reconnect (the venue
+    allowlists its queries, and `orderStatus` is not on the list).
+
+    The venue's platform API is not yet documented and its testnet is not
+    reachable from every region, so the adapter has not run the adoption
+    gate: the cancel action shape, the exact signing preimage, and the
+    exchange response envelope follow the Hyperliquid lineage and are marked
+    `UNVERIFIED` in `txflow/constants.go` and `txflow/wire.go`. `Testnet`
+    resolves only with explicit endpoint and signing overrides.
+
 For the full set of invariants every adapter upholds — post-only semantics,
 fill sourcing, event ordering, and more — see
 [the contract](concepts/contract.md). Before building on any of this,

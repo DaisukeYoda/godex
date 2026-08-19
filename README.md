@@ -5,7 +5,7 @@
   </picture>
 
   <p><strong>Go trading integration layer for perpetual DEXes</strong><br>
-  Lighter (zkLighter) · dYdX v4 · Hyperliquid</p>
+  Lighter (zkLighter) · dYdX v4 · Hyperliquid · TxFlow</p>
 
   <p>
     <a href="https://github.com/DaisukeYoda/godex/actions/workflows/ci.yml"><img src="https://github.com/DaisukeYoda/godex/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -34,15 +34,20 @@ events; venue protocol details never leak out.
 This is **not** a generic exchange SDK. The contract intentionally supports
 exactly what a post-only maker / IOC taker strategy needs.
 
-**Status: pre-release.** All three adapters are implemented with full unit
-suites, and all three have passed the full testnet
+**Status: pre-release.** Every adapter is implemented with a full unit suite
+and runs the shared conformance suite; three have passed the full testnet
 [adoption-gate run](https://daisukeyoda.github.io/godex/guides/smoke-testing/).
+TxFlow has not: its platform API is undocumented as yet and its testnet
+endpoints are unknown, so the details its adapter could only assume are marked
+`UNVERIFIED` in `txflow/constants.go` and `txflow/wire.go` until a live run
+settles them.
 
 | Venue | Execution | Market data | Adoption gate |
 | :--- | :---: | :---: | :---: |
 | **Lighter** (zkLighter) | ✅ | ✅ | ✅ passed |
 | **dYdX v4** | ✅ | ✅ | ✅ passed |
 | **Hyperliquid** | ✅ | — | ✅ passed |
+| **TxFlow** | 🚧 unverified live | — | ⏳ pending |
 
 ## Install
 

@@ -17,11 +17,20 @@
 //	  go run ./cmd/godex-smoke -venue hyperliquid -network testnet \
 //	  -coin ETH -symbol ETH-PERP -size 0.010 [-wait-fill] [-reconnect-check]
 //
+//	TXFLOW_ACCOUNT_ADDRESS=0x... TXFLOW_API_PRIVATE_KEY=0x... \
+//	  go run ./cmd/godex-smoke -venue txflow -network mainnet \
+//	  -market ETH-USDC -maintenance-margin-fraction 0.025 -symbol ETH-PERP -size 0.010 \
+//	  [-wait-fill] [-reconnect-check]
+//
 // Markets are named per venue: Lighter takes a numeric -market-id, dYdX a
-// -ticker, Hyperliquid a -coin. Credentials must be venue-scoped trading keys —
-// never L1 master keys — and should be testnet-only; on Hyperliquid that means
-// an API (agent) wallet, which can trade but cannot withdraw. -record streams
-// the raw account WS frames to a JSONL file (fixture refresh, auth-expiry
+// -ticker, Hyperliquid a -coin, TxFlow a -market. Credentials must be
+// venue-scoped trading keys — never L1 master keys — and should be
+// testnet-only; on Hyperliquid and TxFlow that means an API (agent) wallet,
+// which can trade but cannot withdraw. TxFlow's testnet endpoints are not yet
+// known, so its adapter resolves only -network mainnet; TxFlow also exposes no
+// maintenance-margin schedule the adapter can read, so the market's strictest
+// tier is passed as -maintenance-margin-fraction. -record streams the raw
+// account WS frames to a JSONL file (fixture refresh, auth-expiry
 // observation); it is Lighter-only.
 package main
 
@@ -46,6 +55,7 @@ import (
 	"github.com/DaisukeYoda/godex/hyperliquid"
 	"github.com/DaisukeYoda/godex/lighter"
 	"github.com/DaisukeYoda/godex/smoketest"
+	"github.com/DaisukeYoda/godex/txflow"
 	lighterclient "github.com/elliottech/lighter-go/client"
 	lighterhttp "github.com/elliottech/lighter-go/client/http"
 	"github.com/gorilla/websocket"
@@ -55,6 +65,7 @@ const (
 	venueLighter     = "lighter"
 	venueDydx        = "dydx"
 	venueHyperliquid = "hyperliquid"
+	venueTxFlow      = "txflow"
 
 	// Body-level success code of the Lighter REST API.
 	lighterRESTSuccessCode = 200
@@ -72,6 +83,8 @@ type options struct {
 	marketID       int64
 	ticker         string
 	coin           string
+	market         string
+	marginFraction decimal.Decimal
 	symbol         string
 	size           decimal.Decimal
 	waitFill       bool
@@ -108,19 +121,24 @@ func run() error {
 		return runDydx(ctx, opts)
 	case venueHyperliquid:
 		return runHyperliquid(ctx, opts)
+	case venueTxFlow:
+		return runTxFlow(ctx, opts)
 	default:
-		return fmt.Errorf("unknown venue %q (supported: %s, %s, %s)",
-			opts.venue, venueLighter, venueDydx, venueHyperliquid)
+		return fmt.Errorf("unknown venue %q (supported: %s, %s, %s, %s)",
+			opts.venue, venueLighter, venueDydx, venueHyperliquid, venueTxFlow)
 	}
 }
 
 func parseFlags(args []string) (options, error) {
 	flags := flag.NewFlagSet("godex-smoke", flag.ContinueOnError)
-	venue := flags.String("venue", "", "venue to test (required; supported: lighter, dydx, hyperliquid)")
+	venue := flags.String("venue", "", "venue to test (required; supported: lighter, dydx, hyperliquid, txflow)")
 	network := flags.String("network", "", "testnet or mainnet (required; use testnet)")
 	marketID := flags.Int64("market-id", -1, "Lighter market index (required for -venue lighter; e.g. SOL testnet = 2)")
 	ticker := flags.String("ticker", "", "dYdX market ticker (required for -venue dydx; e.g. ETH-USD)")
 	coin := flags.String("coin", "", "Hyperliquid perp name (required for -venue hyperliquid; e.g. ETH)")
+	market := flags.String("market", "", "TxFlow perp name (required for -venue txflow; e.g. ETH-USDC)")
+	marginFraction := flags.String("maintenance-margin-fraction", "",
+		"maintenance margin rate of the market's strictest tier (required for -venue txflow; e.g. 0.025)")
 	symbol := flags.String("symbol", "", "normalized symbol label (required; e.g. SOL-PERP)")
 	size := flags.String("size", "", "order size as a decimal string (required; e.g. 0.200)")
 	waitFill := flags.Bool("wait-fill", false, "also wait for a natural near-touch maker fill")
@@ -183,10 +201,20 @@ func parseFlags(args []string) (options, error) {
 		if *coin == "" {
 			return options{}, fmt.Errorf("-coin is required for -venue %s", venueHyperliquid)
 		}
+	case venueTxFlow:
+		if *market == "" || *marginFraction == "" {
+			return options{}, fmt.Errorf("-market and -maintenance-margin-fraction are required for -venue %s", venueTxFlow)
+		}
 	}
 	sizeDecimal, err := decimal.FromDecimalString(*size)
 	if err != nil {
 		return options{}, fmt.Errorf("invalid -size: %w", err)
+	}
+	var marginFractionDecimal decimal.Decimal
+	if *marginFraction != "" {
+		if marginFractionDecimal, err = decimal.FromDecimalString(*marginFraction); err != nil {
+			return options{}, fmt.Errorf("invalid -maintenance-margin-fraction: %w", err)
+		}
 	}
 	return options{
 		venue:          *venue,
@@ -194,6 +222,8 @@ func parseFlags(args []string) (options, error) {
 		marketID:       *marketID,
 		ticker:         *ticker,
 		coin:           *coin,
+		market:         *market,
+		marginFraction: marginFractionDecimal,
 		symbol:         *symbol,
 		size:           sizeDecimal,
 		waitFill:       *waitFill,
@@ -281,6 +311,9 @@ func runLighter(ctx context.Context, opts options) error {
 		},
 		Logf:     logf,
 		WaitFill: opts.waitFill,
+		// The venue's account stream never reports a caller's cancel (see the
+		// lighter package comment), so the cancel gate cannot wait for one.
+		CancelUnobservable: true,
 	}
 	if opts.reconnectCheck {
 		cfg.ForceReconnect = executor.ForceReconnect
@@ -647,7 +680,7 @@ func runHyperliquid(ctx context.Context, opts options) error {
 		Symbol: godex.Symbol(opts.symbol),
 		Size:   opts.size,
 		FetchTOB: func(ctx context.Context) (smoketest.TOB, error) {
-			return fetchHyperliquidTOB(ctx, restBaseURL, opts.coin)
+			return fetchL2BookTOB(ctx, restBaseURL, opts.coin)
 		},
 		Logf:     logf,
 		WaitFill: opts.waitFill,
@@ -662,10 +695,12 @@ func runHyperliquid(ctx context.Context, opts options) error {
 	return nil
 }
 
-// fetchHyperliquidTOB reads the venue's top of book from the public l2Book
-// endpoint (outside the executor contract, so the harness fetches it
-// directly). The venue returns [bids, asks], each already sorted best first.
-func fetchHyperliquidTOB(ctx context.Context, restBaseURL, coin string) (smoketest.TOB, error) {
+// fetchL2BookTOB reads a Hyperliquid-lineage venue's top of book from its
+// public l2Book query (outside the executor contract, so the harness fetches
+// it directly). The venue returns [bids, asks], each already sorted best
+// first. coin is whatever the venue keys the query by: the perp name on
+// Hyperliquid, the asset index on TxFlow.
+func fetchL2BookTOB(ctx context.Context, restBaseURL, coin string) (smoketest.TOB, error) {
 	requestCtx, cancel := context.WithTimeout(ctx, tobRequestTimeout)
 	defer cancel()
 	payload, err := json.Marshal(map[string]string{"type": "l2Book", "coin": coin})
@@ -713,4 +748,107 @@ func fetchHyperliquidTOB(ctx context.Context, restBaseURL, coin string) (smokete
 		return smoketest.TOB{}, err
 	}
 	return smoketest.TOB{BestBid: bestBid, BestAsk: bestAsk}, nil
+}
+
+func loadTxFlowCredentials() (txflow.Credentials, error) {
+	accountAddress, err := requireEnv("TXFLOW_ACCOUNT_ADDRESS")
+	if err != nil {
+		return txflow.Credentials{}, err
+	}
+	apiPrivateKey, err := requireEnv("TXFLOW_API_PRIVATE_KEY")
+	if err != nil {
+		return txflow.Credentials{}, err
+	}
+	return txflow.Credentials{AccountAddress: accountAddress, APIPrivateKey: apiPrivateKey}, nil
+}
+
+func runTxFlow(ctx context.Context, opts options) error {
+	credentials, err := loadTxFlowCredentials()
+	if err != nil {
+		return err
+	}
+	network := txflow.Network(opts.network)
+	restBaseURL, err := network.RESTBaseURL()
+	if err != nil {
+		return err
+	}
+	assetIndex, err := fetchTxFlowAssetIndex(ctx, restBaseURL, opts.market)
+	if err != nil {
+		return err
+	}
+
+	executor, err := txflow.New(txflow.Config{
+		Credentials:               credentials,
+		Symbol:                    godex.Symbol(opts.symbol),
+		Market:                    opts.market,
+		Network:                   network,
+		MaintenanceMarginFraction: opts.marginFraction,
+	})
+	if err != nil {
+		return err
+	}
+	if opts.recordPath != "" {
+		logf("note: -record is Lighter-only and is ignored for %s", venueTxFlow)
+	}
+
+	cfg := smoketest.Config{
+		Symbol: godex.Symbol(opts.symbol),
+		Size:   opts.size,
+		FetchTOB: func(ctx context.Context) (smoketest.TOB, error) {
+			return fetchL2BookTOB(ctx, restBaseURL, assetIndex)
+		},
+		Logf:     logf,
+		WaitFill: opts.waitFill,
+	}
+	if opts.reconnectCheck {
+		cfg.ForceReconnect = executor.ForceReconnect
+	}
+	if err := smoketest.Run(ctx, executor, cfg); err != nil {
+		return err
+	}
+	logf("all adoption gates passed")
+	return nil
+}
+
+// fetchTxFlowAssetIndex resolves a TxFlow market name to the asset index its
+// public queries are keyed by, rendered the way those queries take it.
+func fetchTxFlowAssetIndex(ctx context.Context, restBaseURL, market string) (string, error) {
+	requestCtx, cancel := context.WithTimeout(ctx, tobRequestTimeout)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestCtx, http.MethodPost,
+		restBaseURL+"/info", strings.NewReader(`{"type":"perpMeta"}`))
+	if err != nil {
+		return "", err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = response.Body.Close() }()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("perpMeta failed: HTTP %d", response.StatusCode)
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return "", err
+	}
+	var meta struct {
+		Universe []struct {
+			Name  *string `json:"name"`
+			Index *int    `json:"index"`
+		} `json:"universe"`
+	}
+	if err := json.Unmarshal(body, &meta); err != nil {
+		return "", fmt.Errorf("perpMeta returned malformed JSON: %w", err)
+	}
+	for _, entry := range meta.Universe {
+		if entry.Name != nil && *entry.Name == market {
+			if entry.Index == nil {
+				return "", fmt.Errorf("perpMeta entry %s carries no index", market)
+			}
+			return strconv.Itoa(*entry.Index), nil
+		}
+	}
+	return "", fmt.Errorf("perpMeta lists no market %q", market)
 }
