@@ -906,7 +906,7 @@ credentials. Both are available for Lighter and dYdX today.</p>
 <div class="highlight"><pre><span></span><code><span class="kd">type</span><span class="w"> </span><span class="nx">MarketStream</span><span class="w"> </span><span class="kd">interface</span><span class="w"> </span><span class="p">{</span><span class="w">          </span><span class="c1">// WS order-book stream</span>
 <span class="w">    </span><span class="nx">VenueID</span><span class="p">()</span><span class="w"> </span><span class="nx">VenueID</span>
 <span class="w">    </span><span class="nx">Start</span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Context</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span>
-<span class="w">    </span><span class="nx">Events</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;-</span><span class="kd">chan</span><span class="w"> </span><span class="nx">MarketEvent</span><span class="w">        </span><span class="c1">// BookSnapshot | MarketConnected | MarketDisconnected</span>
+<span class="w">    </span><span class="nx">Events</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;-</span><span class="kt">chan</span><span class="w"> </span><span class="nx">MarketEvent</span><span class="w">        </span><span class="c1">// BookSnapshot | MarketConnected | MarketDisconnected</span>
 <span class="w">    </span><span class="nx">Close</span><span class="p">()</span><span class="w"> </span><span class="kt">error</span>
 <span class="p">}</span>
 

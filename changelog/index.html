@@ -789,13 +789,75 @@ releases, and will until the venue set stops pushing on it.</p>
 passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.</p>
+<h2 id="unreleased-txflow-adapter">Unreleased — TxFlow adapter<a class="headerlink" href="#unreleased-txflow-adapter" title="Permanent link">&para;</a></h2>
+<p>Adds a fourth executor, for TxFlow's perp DEX (<code>txflow</code>), and factors the
+signing primitives it shares with Hyperliquid into <code>internal/evmsign</code>. The
+adapter runs the full unit and shared conformance suites against a fake
+venue but is <strong>not yet adopted</strong>: TxFlow's platform API is undocumented as
+of this release and its testnet endpoints are unknown, so every protocol
+detail the adapter could only assume from the venue's web client — the
+cancel action shape, the signing preimage omitting the action type, the
+exchange response envelope, the resting-order status string — is marked
+<code>UNVERIFIED</code> in <code>txflow/constants.go</code> and <code>txflow/wire.go</code>.</p>
+<h3 id="added">Added<a class="headerlink" href="#added" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong><code>txflow.New</code></strong> — a <code>godex.VenueExecutor</code> for TxFlow. The venue's API
+  descends from Hyperliquid's (<code>/info</code>, <code>/exchange</code>, MessagePack action
+  hash signed as an EIP-712 <code>Agent</code>), with differences the adapter absorbs:
+  markets resolve through <code>perpMeta</code> by an explicit asset index and decimal
+  steps (<code>basePrecision</code>, <code>priceTick</code>); per-market queries are keyed by
+  that index; the info endpoint allowlists its query types (no <code>meta</code>,
+  <code>orderStatus</code>, <code>extraAgents</code>, or fills stream); the WebSocket subscribe
+  envelope names the channel beside the method; and the EIP-712 domain and
+  <code>Agent</code> struct carry the network name, chain id and API version.</li>
+<li><strong>Fills by polling.</strong> The venue streams no executions, so the executor
+  polls the <code>userFills</code> query (<code>FillPollInterval</code>, default 2s), seeds the
+  account's history at Connect without publishing it, deduplicates by trade
+  id, and attributes fills to orders by venue oid — including after the
+  order has ended, through a bounded oid index. A filled order update and a
+  reconnect wake the poll ahead of its tick.</li>
+<li><strong>Orders keyed by venue oid.</strong> The venue's client sends no client order
+  id and whether the venue accepts one is unverified, so cancels use the
+  oid the placing response returned. An order update that arrives before
+  the placing response is held and applied when the oid is bound. An
+  ambiguous submission — no oid — is recovered by matching the account's
+  <code>historicalOrders</code> against what was submitted (market, side, price, size,
+  reduce-only, at or after the submission time): exactly one candidate is
+  claimed and cancelled, none clears the fault, several keep it latched
+  (nothing is guessed). Fills under an unrecognized oid are held while any
+  submission's oid is unknown, so an execution that lands before its
+  placing response is attributed rather than published nameless. A
+  submission cut short by <code>Close</code>, and any <code>/exchange</code> status other than
+  <code>ok</code>/<code>err</code>, are unknown outcomes (<code>ErrTxOutcomeUnknown</code>), never clean
+  failures.</li>
+<li><strong><code>Config.MaintenanceMarginFraction</code></strong> (required). The venue documents
+  tiered, per-market maintenance rates but exposes them through no query
+  the adapter has found; the caller supplies the strictest tier.</li>
+<li><strong><code>txflow.Testnet</code></strong> fails to resolve until <code>RESTBaseURL</code>, <code>WSURL</code> and
+  <code>Signing</code> overrides are supplied — no placeholder endpoints.</li>
+<li><strong><code>internal/evmsign</code></strong> — keccak, EIP-712 domain/digest helpers, the
+  MessagePack action hash, minimal-form hex, address derivation and the
+  secp256k1 <code>KeySigner</code>, shared by <code>hyperliquid</code> and <code>txflow</code>. Hyperliquid's
+  reference signing vectors pass unchanged over the extraction.</li>
+<li><strong><code>godex.VenueTxFlow</code></strong>, and <code>cmd/godex-smoke -venue txflow</code> with
+  <code>-market</code>, <code>-maintenance-margin-fraction</code>, <code>TXFLOW_ACCOUNT_ADDRESS</code> and
+  <code>TXFLOW_API_PRIVATE_KEY</code>.</li>
+</ul>
+<h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
+<ul>
+<li><strong><code>smoketest</code> gate 2 waits for the cancelled order to be reported ended</strong>
+  by the account stream, not merely for the cancel to be accepted — an
+  accepted cancel is no evidence the order left the book. Lighter, whose
+  stream never reports a caller's cancel, opts out through the new
+  <code>smoketest.Config.CancelUnobservable</code>.</li>
+</ul>
 <h2 id="v040-market-data-layer">v0.4.0 — Market data layer<a class="headerlink" href="#v040-market-data-layer" title="Permanent link">&para;</a></h2>
 <p>Adds the public, read-only half a maker/taker strategy consumes: normalized
 order-book streams and funding/statistics polls for Lighter and dYdX, behind
 two new root contracts — <code>MarketStream</code> (WS) and <code>MarketDataClient</code> (REST).
 Like executors, one stream or client serves one market, and neither touches
 credentials.</p>
-<h3 id="added">Added<a class="headerlink" href="#added" title="Permanent link">&para;</a></h3>
+<h3 id="added_1">Added<a class="headerlink" href="#added_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li><strong><code>godex.MarketStream</code> and <code>godex.MarketDataClient</code> contracts</strong>, with
   <code>FundingRate</code>, <code>MarketStats</code>, <code>OrderBook</code>/<code>BookLevel</code>, and the sealed
@@ -874,7 +936,7 @@ exactly once, and a cancel the caller asked for is reported when the venue says
 the order ended rather than when it accepts the request. Consumers that counted
 <code>OrderRejectedEvent</code>s, or that relied on a caller's cancel producing no event,
 will see different behaviour — see Fixed.</p>
-<h3 id="added_1">Added<a class="headerlink" href="#added_1" title="Permanent link">&para;</a></h3>
+<h3 id="added_2">Added<a class="headerlink" href="#added_2" title="Permanent link">&para;</a></h3>
 <ul>
 <li><strong><code>hyperliquid</code> adapter for Hyperliquid, adopted.</strong> The full adoption-gate
   scenario passes on testnet: connect and verified snapshot, far post-only and
@@ -1030,7 +1092,7 @@ will see different behaviour — see Fixed.</p>
 <h2 id="v020-dydx-v4-adapter">v0.2.0 — dYdX v4 adapter<a class="headerlink" href="#v020-dydx-v4-adapter" title="Permanent link">&para;</a></h2>
 <p>Adds <code>dydx</code>, alongside the existing <code>lighter</code>. Both adapters have now passed
 their adoption gates on testnet (dYdX on 2026-07-27, ETH-USD).</p>
-<h3 id="added_2">Added<a class="headerlink" href="#added_2" title="Permanent link">&para;</a></h3>
+<h3 id="added_3">Added<a class="headerlink" href="#added_3" title="Permanent link">&para;</a></h3>
 <ul>
 <li><strong><code>dydx</code> adapter for dYdX v4.</strong> Short-term orders: gas-free, matched
   synchronously in CheckTx — so a crossing post-only returns <code>AckRejected</code> in
@@ -1049,7 +1111,7 @@ their adoption gates on testnet (dYdX on 2026-07-27, ETH-USD).</p>
 <li><strong><code>smoketest.Collector.WaitForAt</code></strong>, which reports where a match landed so an
   ordered sequence can continue strictly after it.</li>
 </ul>
-<h3 id="changed">Changed<a class="headerlink" href="#changed" title="Permanent link">&para;</a></h3>
+<h3 id="changed_1">Changed<a class="headerlink" href="#changed_1" title="Permanent link">&para;</a></h3>
 <ul>
 <li><strong><code>OrderRejectedEvent</code> documents what it always meant.</strong> It closes an order
   rather than voiding it: an IOC that fills part of its size and has the

@@ -672,6 +672,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#how-the-contract-is-verified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How the contract is verified
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1022,6 +1033,17 @@
   
 </li>
       
+        <li class="md-nav__item">
+  <a href="#how-the-contract-is-verified" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        How the contract is verified
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
   
 </nav>
@@ -1044,7 +1066,7 @@
 
 <h1 id="the-venue-contract">The Venue Contract<a class="headerlink" href="#the-venue-contract" title="Permanent link">&para;</a></h1>
 <p><code>VenueExecutor</code> is the single interface godex uses to speak to a perpetual
-DEX — Lighter, dYdX v4, or Hyperliquid. One implementation of it exists per
+DEX — Lighter, dYdX v4, Hyperliquid, or TxFlow. One implementation of it exists per
 venue, and each instance is scoped to exactly one market: authenticated order
 placement, cancellation, and account-state observation all happen behind it,
 with the venue's own wire protocol, signing scheme, and quirks kept entirely
@@ -1061,12 +1083,12 @@ strategy should never require touching the strategy.</p>
 <span class="w">    </span><span class="nx">Connect</span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Context</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nx">ExecutionMetadata</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span>
 <span class="w">    </span><span class="nx">PlaceOrder</span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Context</span><span class="p">,</span><span class="w"> </span><span class="nx">order</span><span class="w"> </span><span class="nx">NewOrder</span><span class="p">)</span><span class="w"> </span><span class="p">(</span><span class="nx">OrderAck</span><span class="p">,</span><span class="w"> </span><span class="kt">error</span><span class="p">)</span>
 <span class="w">    </span><span class="nx">CancelOrder</span><span class="p">(</span><span class="nx">ctx</span><span class="w"> </span><span class="nx">context</span><span class="p">.</span><span class="nx">Context</span><span class="p">,</span><span class="w"> </span><span class="nx">id</span><span class="w"> </span><span class="nx">OrderID</span><span class="p">)</span><span class="w"> </span><span class="kt">error</span>
-<span class="w">    </span><span class="nx">AccountEvents</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;-</span><span class="kd">chan</span><span class="w"> </span><span class="nx">AccountEvent</span>
+<span class="w">    </span><span class="nx">AccountEvents</span><span class="p">()</span><span class="w"> </span><span class="o">&lt;-</span><span class="kt">chan</span><span class="w"> </span><span class="nx">AccountEvent</span>
 <span class="w">    </span><span class="nx">Close</span><span class="p">()</span><span class="w"> </span><span class="kt">error</span>
 <span class="p">}</span>
 </code></pre></div>
 <h2 id="design-invariants">Design invariants<a class="headerlink" href="#design-invariants" title="Permanent link">&para;</a></h2>
-<p>Every adapter — Lighter, dYdX v4, Hyperliquid — upholds the following. This
+<p>Every adapter — Lighter, dYdX v4, Hyperliquid, TxFlow — upholds the following. This
 page is the canonical, detailed reference for them; treat it as complete.</p>
 <h3 id="maker-orders-are-post-only">Maker orders are post-only<a class="headerlink" href="#maker-orders-are-post-only" title="Permanent link">&para;</a></h3>
 <p>A taker-crossing rejection is a normal-path outcome: <code>PlaceOrder</code> returns
@@ -1146,6 +1168,24 @@ anywhere near order flow.</p>
 from price and size arithmetic; any conversion at the boundary of the
 library must go through <code>decimal</code>, never through a native float.</p>
 </div>
+<h2 id="how-the-contract-is-verified">How the contract is verified<a class="headerlink" href="#how-the-contract-is-verified" title="Permanent link">&para;</a></h2>
+<p>The clauses above are not only prose. <code>internal/conformance</code> holds one test
+per shared clause, and every adapter runs the same suite against its own fake
+venue, under the same clause names:</p>
+<div class="highlight"><pre><span></span><code>go test ./lighter/ ./dydx/ ./hyperliquid/ ./txflow/ -run TestConformance -v
+</code></pre></div>
+<p>An adapter supplies only a small harness — a connected executor, the order to
+place, and the handful of things a clause needs to make its venue act (force a
+reconnect, report an order ended, report an execution). A clause that does not
+run there is declared with its reason, and the reason says which kind it is:</p>
+<ul>
+<li><code>VENUE:</code> a limitation of the venue itself, which no adapter work would
+  remove. Lighter's account stream reports only post-only cancellations and it
+  has no order-status query, so two clauses genuinely cannot be driven there.</li>
+<li><code>GAP:</code> unfinished work in the adapter, which is a bug.</li>
+</ul>
+<p>Skips are printed by <code>go test -v</code>, so the venues a clause does <em>not</em> hold for
+are readable off a test run rather than inferred from an absent test.</p>
 
 
 

@@ -879,19 +879,19 @@
 <p>Each adapter is constructed with a venue-specific <code>Config</code> and then satisfies
 the same <code>godex.VenueExecutor</code> contract — <code>Connect</code>, <code>PlaceOrder</code>,
 <code>CancelOrder</code>, <code>AccountEvents</code>, <code>Close</code>. Pick your venue below.</p>
-<div class="tabbed-set tabbed-alternate" data-tabs="1:3"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Lighter</label><label for="__tabbed_1_2">dYdX v4</label><label for="__tabbed_1_3">Hyperliquid</label></div>
+<div class="tabbed-set tabbed-alternate" data-tabs="1:4"><input checked="checked" id="__tabbed_1_1" name="__tabbed_1" type="radio" /><input id="__tabbed_1_2" name="__tabbed_1" type="radio" /><input id="__tabbed_1_3" name="__tabbed_1" type="radio" /><input id="__tabbed_1_4" name="__tabbed_1" type="radio" /><div class="tabbed-labels"><label for="__tabbed_1_1">Lighter</label><label for="__tabbed_1_2">dYdX v4</label><label for="__tabbed_1_3">Hyperliquid</label><label for="__tabbed_1_4">TxFlow</label></div>
 <div class="tabbed-content">
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><span class="kn">package</span><span class="w"> </span><span class="nx">main</span>
 
 <span class="kn">import</span><span class="w"> </span><span class="p">(</span>
-<span class="w">    </span><span class="s">&quot;context&quot;</span>
-<span class="w">    </span><span class="s">&quot;log&quot;</span>
-<span class="w">    </span><span class="s">&quot;os&quot;</span>
+<span class="w">    </span><span class="s">"context"</span>
+<span class="w">    </span><span class="s">"log"</span>
+<span class="w">    </span><span class="s">"os"</span>
 
-<span class="w">    </span><span class="s">&quot;github.com/DaisukeYoda/godex&quot;</span>
-<span class="w">    </span><span class="s">&quot;github.com/DaisukeYoda/godex/decimal&quot;</span>
-<span class="w">    </span><span class="s">&quot;github.com/DaisukeYoda/godex/lighter&quot;</span>
+<span class="w">    </span><span class="s">"github.com/DaisukeYoda/godex"</span>
+<span class="w">    </span><span class="s">"github.com/DaisukeYoda/godex/decimal"</span>
+<span class="w">    </span><span class="s">"github.com/DaisukeYoda/godex/lighter"</span>
 <span class="p">)</span>
 
 <span class="kd">func</span><span class="w"> </span><span class="nx">main</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
@@ -899,9 +899,9 @@ the same <code>godex.VenueExecutor</code> contract — <code>Connect</code>, <co
 <span class="w">        </span><span class="nx">Credentials</span><span class="p">:</span><span class="w"> </span><span class="nx">lighter</span><span class="p">.</span><span class="nx">Credentials</span><span class="p">{</span>
 <span class="w">            </span><span class="nx">AccountIndex</span><span class="p">:</span><span class="w">  </span><span class="mi">48</span><span class="p">,</span>
 <span class="w">            </span><span class="nx">APIKeyIndex</span><span class="p">:</span><span class="w">   </span><span class="mi">2</span><span class="p">,</span>
-<span class="w">            </span><span class="nx">APIPrivateKey</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;LIGHTER_API_PRIVATE_KEY&quot;</span><span class="p">),</span>
+<span class="w">            </span><span class="nx">APIPrivateKey</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"LIGHTER_API_PRIVATE_KEY"</span><span class="p">),</span>
 <span class="w">        </span><span class="p">},</span>
-<span class="w">        </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">   </span><span class="s">&quot;SOL-PERP&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">   </span><span class="s">"SOL-PERP"</span><span class="p">,</span>
 <span class="w">        </span><span class="nx">MarketID</span><span class="p">:</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="c1">// SOL on testnet</span>
 <span class="w">        </span><span class="nx">Network</span><span class="p">:</span><span class="w">  </span><span class="nx">lighter</span><span class="p">.</span><span class="nx">Testnet</span><span class="p">,</span>
 <span class="w">    </span><span class="p">})</span>
@@ -912,7 +912,7 @@ the same <code>godex.VenueExecutor</code> contract — <code>Connect</code>, <co
 
 <span class="w">    </span><span class="k">go</span><span class="w"> </span><span class="kd">func</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
 <span class="w">        </span><span class="k">for</span><span class="w"> </span><span class="nx">event</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="k">range</span><span class="w"> </span><span class="nx">exec</span><span class="p">.</span><span class="nx">AccountEvents</span><span class="p">()</span><span class="w"> </span><span class="p">{</span>
-<span class="w">            </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;%#v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="p">)</span>
+<span class="w">            </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"%#v"</span><span class="p">,</span><span class="w"> </span><span class="nx">event</span><span class="p">)</span>
 <span class="w">        </span><span class="p">}</span>
 <span class="w">    </span><span class="p">}()</span>
 
@@ -921,33 +921,33 @@ the same <code>godex.VenueExecutor</code> contract — <code>Connect</code>, <co
 <span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span>
 <span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
 <span class="w">    </span><span class="p">}</span>
-<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;sizeStep=%s mmf=%s&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">meta</span><span class="p">.</span><span class="nx">SizeStep</span><span class="p">,</span><span class="w"> </span><span class="nx">meta</span><span class="p">.</span><span class="nx">MaintenanceMarginFraction</span><span class="p">)</span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"sizeStep=%s mmf=%s"</span><span class="p">,</span><span class="w"> </span><span class="nx">meta</span><span class="p">.</span><span class="nx">SizeStep</span><span class="p">,</span><span class="w"> </span><span class="nx">meta</span><span class="p">.</span><span class="nx">MaintenanceMarginFraction</span><span class="p">)</span>
 
 <span class="w">    </span><span class="nx">ack</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">exec</span><span class="p">.</span><span class="nx">PlaceOrder</span><span class="p">(</span><span class="nx">ctx</span><span class="p">,</span><span class="w"> </span><span class="nx">godex</span><span class="p">.</span><span class="nx">NewOrder</span><span class="p">{</span>
-<span class="w">        </span><span class="nx">Symbol</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;SOL-PERP&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">Symbol</span><span class="p">:</span><span class="w"> </span><span class="s">"SOL-PERP"</span><span class="p">,</span>
 <span class="w">        </span><span class="nx">Side</span><span class="p">:</span><span class="w">   </span><span class="nx">godex</span><span class="p">.</span><span class="nx">SideBuy</span><span class="p">,</span>
-<span class="w">        </span><span class="nx">Price</span><span class="p">:</span><span class="w">  </span><span class="nx">decimal</span><span class="p">.</span><span class="nx">MustFromString</span><span class="p">(</span><span class="s">&quot;80.000&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">),</span><span class="w"> </span><span class="c1">// rounded to tick by the adapter</span>
-<span class="w">        </span><span class="nx">Size</span><span class="p">:</span><span class="w">   </span><span class="nx">decimal</span><span class="p">.</span><span class="nx">MustFromString</span><span class="p">(</span><span class="s">&quot;0.200&quot;</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">Price</span><span class="p">:</span><span class="w">  </span><span class="nx">decimal</span><span class="p">.</span><span class="nx">MustFromString</span><span class="p">(</span><span class="s">"80.000"</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">),</span><span class="w"> </span><span class="c1">// rounded to tick by the adapter</span>
+<span class="w">        </span><span class="nx">Size</span><span class="p">:</span><span class="w">   </span><span class="nx">decimal</span><span class="p">.</span><span class="nx">MustFromString</span><span class="p">(</span><span class="s">"0.200"</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">),</span>
 <span class="w">        </span><span class="nx">Intent</span><span class="p">:</span><span class="w"> </span><span class="nx">godex</span><span class="p">.</span><span class="nx">IntentPostOnly</span><span class="p">,</span>
 <span class="w">    </span><span class="p">})</span>
 <span class="w">    </span><span class="k">if</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">!=</span><span class="w"> </span><span class="kc">nil</span><span class="w"> </span><span class="p">{</span>
 <span class="w">        </span><span class="nx">log</span><span class="p">.</span><span class="nx">Fatal</span><span class="p">(</span><span class="nx">err</span><span class="p">)</span>
 <span class="w">    </span><span class="p">}</span>
-<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">&quot;ack: %+v&quot;</span><span class="p">,</span><span class="w"> </span><span class="nx">ack</span><span class="p">)</span>
+<span class="w">    </span><span class="nx">log</span><span class="p">.</span><span class="nx">Printf</span><span class="p">(</span><span class="s">"ack: %+v"</span><span class="p">,</span><span class="w"> </span><span class="nx">ack</span><span class="p">)</span>
 <span class="p">}</span>
 </code></pre></div>
 </div>
 <div class="tabbed-block">
 <div class="highlight"><pre><span></span><code><span class="nx">exec</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">dydx</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">dydx</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span>
 <span class="w">    </span><span class="nx">Credentials</span><span class="p">:</span><span class="w"> </span><span class="nx">dydx</span><span class="p">.</span><span class="nx">Credentials</span><span class="p">{</span>
-<span class="w">        </span><span class="nx">PrivateKeyHex</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;DYDX_PRIVATE_KEY_HEX&quot;</span><span class="p">),</span>
-<span class="w">        </span><span class="nx">Address</span><span class="p">:</span><span class="w">       </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;DYDX_ADDRESS&quot;</span><span class="p">),</span><span class="w"> </span><span class="c1">// dydx1... — the account orders belong to</span>
+<span class="w">        </span><span class="nx">PrivateKeyHex</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"DYDX_PRIVATE_KEY_HEX"</span><span class="p">),</span>
+<span class="w">        </span><span class="nx">Address</span><span class="p">:</span><span class="w">       </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"DYDX_ADDRESS"</span><span class="p">),</span><span class="w"> </span><span class="c1">// dydx1... — the account orders belong to</span>
 <span class="w">        </span><span class="nx">SubaccountNumber</span><span class="p">:</span><span class="w"> </span><span class="mi">0</span><span class="p">,</span>
 <span class="w">        </span><span class="c1">// Optional: the on-chain authenticator scoping this key to trading only.</span>
 <span class="w">        </span><span class="nx">AuthenticatorID</span><span class="p">:</span><span class="w"> </span><span class="kc">nil</span><span class="p">,</span>
 <span class="w">    </span><span class="p">},</span>
-<span class="w">    </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">  </span><span class="s">&quot;ETH-PERP&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nx">Ticker</span><span class="p">:</span><span class="w">  </span><span class="s">&quot;ETH-USD&quot;</span><span class="p">,</span><span class="w"> </span><span class="c1">// venue market ticker</span>
+<span class="w">    </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">  </span><span class="s">"ETH-PERP"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Ticker</span><span class="p">:</span><span class="w">  </span><span class="s">"ETH-USD"</span><span class="p">,</span><span class="w"> </span><span class="c1">// venue market ticker</span>
 <span class="w">    </span><span class="nx">Network</span><span class="p">:</span><span class="w"> </span><span class="nx">dydx</span><span class="p">.</span><span class="nx">Testnet</span><span class="p">,</span>
 <span class="p">})</span>
 </code></pre></div>
@@ -965,13 +965,13 @@ module, whose forked cosmos-sdk pins do not resolve transitively.</p>
 <span class="w">    </span><span class="nx">Credentials</span><span class="p">:</span><span class="w"> </span><span class="nx">hyperliquid</span><span class="p">.</span><span class="nx">Credentials</span><span class="p">{</span>
 <span class="w">        </span><span class="c1">// The account that holds the position — the master account when an</span>
 <span class="w">        </span><span class="c1">// API wallet signs for it.</span>
-<span class="w">        </span><span class="nx">AccountAddress</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;HYPERLIQUID_ACCOUNT_ADDRESS&quot;</span><span class="p">),</span><span class="w"> </span><span class="c1">// 0x...</span>
-<span class="w">        </span><span class="nx">APIPrivateKey</span><span class="p">:</span><span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">&quot;HYPERLIQUID_API_PRIVATE_KEY&quot;</span><span class="p">),</span><span class="w"> </span><span class="c1">// API (agent) wallet key</span>
+<span class="w">        </span><span class="nx">AccountAddress</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"HYPERLIQUID_ACCOUNT_ADDRESS"</span><span class="p">),</span><span class="w"> </span><span class="c1">// 0x...</span>
+<span class="w">        </span><span class="nx">APIPrivateKey</span><span class="p">:</span><span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"HYPERLIQUID_API_PRIVATE_KEY"</span><span class="p">),</span><span class="w"> </span><span class="c1">// API (agent) wallet key</span>
 <span class="w">        </span><span class="c1">// Optional: route orders to a vault or subaccount instead.</span>
-<span class="w">        </span><span class="nx">VaultAddress</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;&quot;</span><span class="p">,</span>
+<span class="w">        </span><span class="nx">VaultAddress</span><span class="p">:</span><span class="w"> </span><span class="s">""</span><span class="p">,</span>
 <span class="w">    </span><span class="p">},</span>
-<span class="w">    </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">  </span><span class="s">&quot;ETH-PERP&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nx">Coin</span><span class="p">:</span><span class="w">    </span><span class="s">&quot;ETH&quot;</span><span class="p">,</span><span class="w"> </span><span class="c1">// venue perp name</span>
+<span class="w">    </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">  </span><span class="s">"ETH-PERP"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Coin</span><span class="p">:</span><span class="w">    </span><span class="s">"ETH"</span><span class="p">,</span><span class="w"> </span><span class="c1">// venue perp name</span>
 <span class="w">    </span><span class="nx">Network</span><span class="p">:</span><span class="w"> </span><span class="nx">hyperliquid</span><span class="p">.</span><span class="nx">Testnet</span><span class="p">,</span>
 <span class="p">})</span>
 </code></pre></div>
@@ -997,6 +997,45 @@ never replayed.</p>
 drops to 5x above $50k of notional — so <code>MaintenanceMarginFraction</code>,
 which is a single ratio, carries the strictest tier rather than the
 headline one.</p>
+</div>
+<div class="tabbed-block">
+<div class="highlight"><pre><span></span><code><span class="nx">exec</span><span class="p">,</span><span class="w"> </span><span class="nx">err</span><span class="w"> </span><span class="o">:=</span><span class="w"> </span><span class="nx">txflow</span><span class="p">.</span><span class="nx">New</span><span class="p">(</span><span class="nx">txflow</span><span class="p">.</span><span class="nx">Config</span><span class="p">{</span>
+<span class="w">    </span><span class="nx">Credentials</span><span class="p">:</span><span class="w"> </span><span class="nx">txflow</span><span class="p">.</span><span class="nx">Credentials</span><span class="p">{</span>
+<span class="w">        </span><span class="nx">AccountAddress</span><span class="p">:</span><span class="w"> </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"TXFLOW_ACCOUNT_ADDRESS"</span><span class="p">),</span><span class="w"> </span><span class="c1">// 0x...</span>
+<span class="w">        </span><span class="nx">APIPrivateKey</span><span class="p">:</span><span class="w">  </span><span class="nx">os</span><span class="p">.</span><span class="nx">Getenv</span><span class="p">(</span><span class="s">"TXFLOW_API_PRIVATE_KEY"</span><span class="p">),</span><span class="w"> </span><span class="c1">// trading (agent) wallet key</span>
+<span class="w">    </span><span class="p">},</span>
+<span class="w">    </span><span class="nx">Symbol</span><span class="p">:</span><span class="w">  </span><span class="s">"ETH-PERP"</span><span class="p">,</span>
+<span class="w">    </span><span class="nx">Market</span><span class="p">:</span><span class="w">  </span><span class="s">"ETH-USDC"</span><span class="p">,</span><span class="w"> </span><span class="c1">// venue perp name, as listed by perpMeta</span>
+<span class="w">    </span><span class="nx">Network</span><span class="p">:</span><span class="w"> </span><span class="nx">txflow</span><span class="p">.</span><span class="nx">Mainnet</span><span class="p">,</span>
+<span class="w">    </span><span class="c1">// The venue publishes tiered, per-market maintenance rates but exposes</span>
+<span class="w">    </span><span class="c1">// no schedule the adapter can read: pass the market's strictest tier.</span>
+<span class="w">    </span><span class="nx">MaintenanceMarginFraction</span><span class="p">:</span><span class="w"> </span><span class="nx">decimal</span><span class="p">.</span><span class="nx">MustFromString</span><span class="p">(</span><span class="s">"0.025"</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">),</span>
+<span class="p">})</span>
+</code></pre></div>
+<p>TxFlow's API descends from Hyperliquid's, and so does the adapter:
+orders are signed as L1 actions under an EIP-712 <code>Agent</code> struct that
+also names the network, chain id and API version (<code>internal/evmsign</code>
+holds the primitives both adapters share). What differs shapes the
+executor. Fills are not streamed — they are read by polling the
+<code>userFills</code> query, deduplicated by trade id, and attributed to orders by
+the venue oid the placing response returned, since the venue's client
+sends no client order id. Cancels are keyed by that oid; an ambiguous
+submission, which never got one, is recovered by matching the account's
+order history — market, side, price, size, reduce-only, at or after the
+submission time — and cancelling the one order it can be, or halting if
+it cannot name exactly one. Fills under an oid the executor does not
+recognize are held while any submission's oid is still unknown, so an
+execution that lands before its placing response is attributed rather
+than published nameless. Position and margin
+are read from clearinghouse snapshots; tracked orders are re-checked
+against <code>openOrders</code>/<code>historicalOrders</code> after a reconnect (the venue
+allowlists its queries, and <code>orderStatus</code> is not on the list).</p>
+<p>The venue's platform API is not yet documented and its testnet is not
+reachable from every region, so the adapter has not run the adoption
+gate: the cancel action shape, the exact signing preimage, and the
+exchange response envelope follow the Hyperliquid lineage and are marked
+<code>UNVERIFIED</code> in <code>txflow/constants.go</code> and <code>txflow/wire.go</code>. <code>Testnet</code>
+resolves only with explicit endpoint and signing overrides.</p>
 </div>
 </div>
 </div>

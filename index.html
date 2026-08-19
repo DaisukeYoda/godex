@@ -871,14 +871,18 @@
 
 <h1 id="godex">godex<a class="headerlink" href="#godex" title="Permanent link">&para;</a></h1>
 <p>Go trading integration layer for perpetual DEXes — Lighter (zkLighter), dYdX
-v4, and Hyperliquid. godex owns authenticated order placement, cancellation,
+v4, Hyperliquid, and TxFlow. godex owns authenticated order placement, cancellation,
 account-state observation, and venue-specific signing behind a small,
 safety-oriented contract. Strategy and risk logic depend only on the
 normalized types and events; venue protocol details never leak out. This is
 <strong>not</strong> a generic exchange SDK — the contract intentionally supports exactly
 what a post-only maker / IOC taker strategy needs.</p>
-<p><strong>Status: pre-release.</strong> All three adapters are implemented with full unit
-suites, and all three have passed the full testnet adoption-gate run.</p>
+<p><strong>Status: pre-release.</strong> Every adapter is implemented with a full unit suite
+and runs the shared conformance suite; Lighter, dYdX and Hyperliquid have
+passed the full testnet adoption-gate run. TxFlow has not yet: its platform
+API is undocumented and its testnet endpoints unknown, so the protocol details
+its adapter could only assume are marked <code>UNVERIFIED</code> in the code until a live
+run settles them.</p>
 <h2 id="install">Install<a class="headerlink" href="#install" title="Permanent link">&para;</a></h2>
 <div class="highlight"><pre><span></span><code>go<span class="w"> </span>get<span class="w"> </span>github.com/DaisukeYoda/godex
 </code></pre></div>
