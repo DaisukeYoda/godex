@@ -20,6 +20,7 @@ package lighter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math"
@@ -30,6 +31,7 @@ import (
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
 	"github.com/DaisukeYoda/godex/internal/dedupe"
+	"github.com/DaisukeYoda/godex/internal/dispatch"
 	"github.com/DaisukeYoda/godex/internal/ws"
 	"github.com/elliottech/lighter-go/types/txtypes"
 )
@@ -431,12 +433,18 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 	}
 
 	e.trackOrder(orderID, clientOrderIndex)
-	failure, err := e.submitSignedTx(ctx, func(nonce int64) (uint8, string, error) {
+	failure, err := e.submitSignedTx(ctx, orderID, func(nonce int64) (uint8, string, error) {
 		params.nonce = nonce
 		return e.signer.signCreateOrder(params)
 	})
 	if err != nil {
-		e.untrackOrder(orderID)
+		// An order left in flight may be live, so it stays tracked: its
+		// fills are attributed by client order index, and cancelling by that
+		// index is how a caller retires it. Anything else never reached the
+		// venue.
+		if !isUnknownOutcomeFor(err, orderID) {
+			e.untrackOrder(orderID)
+		}
 		return godex.OrderAck{}, err
 	}
 	if failure != "" {
@@ -486,7 +494,7 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 	// a cancel which did apply after an unknown outcome is reported under the
 	// venue's own wording; that is the honest answer, since the adapter never
 	// learned its cancel was the cause.
-	failure, err := e.submitSignedTx(ctx, func(nonce int64) (uint8, string, error) {
+	failure, err := e.submitSignedTx(ctx, id, func(nonce int64) (uint8, string, error) {
 		return e.signer.signCancelOrder(e.cfg.marketIndex, clientOrderIndex, nonce)
 	})
 	if err != nil {
@@ -546,7 +554,7 @@ func (e *Executor) untrackOrderLocked(id godex.OrderID) {
 // (post-only classification is the caller's job), and ("", err) otherwise.
 // Only invalid-nonce rejections are retried, once, after a resync — an
 // invalid-nonce rejection is unprocessed, so the resend cannot double-submit.
-func (e *Executor) submitSignedTx(ctx context.Context, sign func(nonce int64) (uint8, string, error)) (string, error) {
+func (e *Executor) submitSignedTx(ctx context.Context, orderID godex.OrderID, sign func(nonce int64) (uint8, string, error)) (string, error) {
 	e.txMu.Lock()
 	defer e.txMu.Unlock()
 	if !e.acceptingTx {
@@ -569,14 +577,23 @@ func (e *Executor) submitSignedTx(ctx context.Context, sign func(nonce int64) (u
 			}
 			return "", err
 		}
-		failure, err := e.sendTxLocked(txType, txInfo)
+		failure, dispatched, err := e.sendTxLocked(txType, txInfo)
 		if err != nil {
+			if !dispatched {
+				// Nothing reached the wire — the context was already
+				// canceled, or the connection failed first — so nothing was
+				// applied. The allocated nonce was never submitted either.
+				if resyncErr := e.resyncNonceLocked(); resyncErr != nil {
+					return "", resyncErr
+				}
+				return "", fmt.Errorf("lighter: transaction was not dispatched: %w", err)
+			}
 			// Once dispatched, the venue may have taken the transaction
 			// whatever cut the call short — a Close included. That is an
 			// unknown outcome and is reported as one; a fault latched during
 			// Close is never recovered (nothing runs after Close), which is
 			// why the caller must hear it.
-			return "", e.latchTxFaultLocked(err)
+			return "", e.latchTxFaultLocked(err, orderID)
 		}
 		if failure == "" {
 			return "", nil
@@ -606,10 +623,23 @@ func (e *Executor) assertTxCanStartLocked(ctx context.Context) error {
 	return nil
 }
 
-func (e *Executor) sendTxLocked(txType uint8, txInfo string) (string, error) {
+// sendTxLocked posts one signed transaction and reports, alongside any
+// error, whether the request reached the wire — the line between a failure
+// that applied nothing and an outcome that is unknown.
+func (e *Executor) sendTxLocked(txType uint8, txInfo string) (string, bool, error) {
 	requestCtx, cancel := context.WithTimeout(e.lifecycleCtx, e.cfg.txRequestTimeout)
 	defer cancel()
-	return sendTx(requestCtx, e.cfg.httpClient, e.cfg.restBaseURL, txType, txInfo)
+	requestCtx, dispatched := dispatch.Trace(requestCtx)
+	failure, err := sendTx(requestCtx, e.cfg.httpClient, e.cfg.restBaseURL, txType, txInfo)
+	return failure, dispatched(), err
+}
+
+// isUnknownOutcomeFor reports whether err is the unknown outcome of a
+// transaction on orderID — the one failure that may have left the order live
+// at the venue.
+func isUnknownOutcomeFor(err error, orderID godex.OrderID) bool {
+	var unknown *godex.TxOutcomeUnknownError
+	return errors.As(err, &unknown) && unknown.OrderID == orderID
 }
 
 func (e *Executor) resyncNonceLocked() error {
@@ -619,7 +649,7 @@ func (e *Executor) resyncNonceLocked() error {
 		if e.lifecycleCtx.Err() != nil {
 			return fmt.Errorf("lighter: transaction lifecycle ended: %w", e.lifecycleCtx.Err())
 		}
-		return e.latchTxFaultLocked(err)
+		return e.latchTxFaultLocked(err, "")
 	}
 	return nil
 }
@@ -627,13 +657,19 @@ func (e *Executor) resyncNonceLocked() error {
 // latchTxFaultLocked records an unknown-outcome fault: subsequent
 // transactions are halted (no blind retries that could double-submit) and
 // automatic recovery via nonce resync is scheduled. The faulted transaction
-// itself is never resent.
-func (e *Executor) latchTxFaultLocked(cause error) error {
-	if e.txFault == nil {
-		e.txFault = fmt.Errorf("%w; recovering via nonce resync: %v", godex.ErrTxOutcomeUnknown, cause)
-		e.scheduleFaultRecoveryLocked()
+// itself is never resent. orderID names the order the faulted transaction
+// concerned, if any: that transaction's caller learns it, while the
+// transactions the fault later refuses get the bare fault.
+func (e *Executor) latchTxFaultLocked(cause error, orderID godex.OrderID) error {
+	if e.txFault != nil {
+		return e.txFault
 	}
-	return e.txFault
+	e.txFault = fmt.Errorf("%w; recovering via nonce resync: %v", godex.ErrTxOutcomeUnknown, cause)
+	e.scheduleFaultRecoveryLocked()
+	if orderID == "" {
+		return e.txFault
+	}
+	return &godex.TxOutcomeUnknownError{OrderID: orderID, Err: e.txFault}
 }
 
 func (e *Executor) scheduleFaultRecoveryLocked() {

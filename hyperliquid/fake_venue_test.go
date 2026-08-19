@@ -47,6 +47,9 @@ type scriptedExchange struct {
 	body   string
 	status int
 	delay  time.Duration
+	// arrived, when set, is closed once the venue has read the request —
+	// the moment a test that wants to interrupt the call in flight waits for.
+	arrived chan struct{}
 }
 
 // fakeVenue is an httptest-backed Hyperliquid: /info answers from fixtures, a
@@ -144,6 +147,9 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		}
 		venue.mu.Unlock()
 
+		if script.arrived != nil {
+			close(script.arrived)
+		}
 		if script.delay > 0 {
 			time.Sleep(script.delay)
 		}
@@ -329,7 +335,14 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *smoketest.Coll
 // is.
 func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *smoketest.Collector, <-chan struct{}) {
 	t.Helper()
-	executor, err := New(Config{
+	return newTestExecutorStreamWith(t, venue, nil)
+}
+
+// newTestExecutorStreamWith is newTestExecutorStream with the config adjusted
+// by tweak before construction.
+func newTestExecutorStreamWith(t *testing.T, venue *fakeVenue, tweak func(*Config)) (*Executor, *smoketest.Collector, <-chan struct{}) {
+	t.Helper()
+	cfg := Config{
 		Credentials: Credentials{
 			AccountAddress: testAccount,
 			APIPrivateKey:  referencePrivateKey,
@@ -357,7 +370,11 @@ func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *smoketes
 			}
 			return &recordingSigner{inner: inner}, nil
 		},
-	})
+	}
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	executor, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

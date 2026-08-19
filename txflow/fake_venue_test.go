@@ -61,6 +61,9 @@ type scriptedExchange struct {
 	status int
 	delay  time.Duration
 	lost   bool
+	// arrived, when set, is closed once the venue has read the request —
+	// the moment a test that wants to interrupt the call in flight waits for.
+	arrived chan struct{}
 }
 
 // fakeOrder is one order in the fake venue's records.
@@ -197,6 +200,9 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 		}
 		venue.mu.Unlock()
 
+		if script.arrived != nil {
+			close(script.arrived)
+		}
 		if script.delay > 0 {
 			time.Sleep(script.delay)
 		}

@@ -17,6 +17,7 @@ import (
 
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
+	"github.com/DaisukeYoda/godex/internal/dispatch/dispatchtest"
 	"github.com/DaisukeYoda/godex/smoketest"
 	"github.com/elliottech/lighter-go/types/txtypes"
 	"github.com/gorilla/websocket"
@@ -30,6 +31,9 @@ const (
 type scriptedSendTx struct {
 	body  string
 	delay time.Duration
+	// arrived, when set, is closed once the venue has read the request —
+	// the moment a test that wants to interrupt the call in flight waits for.
+	arrived chan struct{}
 }
 
 // fakeVenue is an httptest-backed Lighter: REST endpoints from fixtures, a
@@ -82,6 +86,9 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 			venue.sendTxQueue = venue.sendTxQueue[1:]
 		}
 		venue.mu.Unlock()
+		if script.arrived != nil {
+			close(script.arrived)
+		}
 		if script.delay > 0 {
 			time.Sleep(script.delay)
 		}
@@ -178,8 +185,15 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *fakeSigner, *s
 // is.
 func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *fakeSigner, *smoketest.Collector, <-chan struct{}) {
 	t.Helper()
+	return newTestExecutorStreamWith(t, venue, nil)
+}
+
+// newTestExecutorStreamWith is newTestExecutorStream with the config adjusted
+// by tweak before construction.
+func newTestExecutorStreamWith(t *testing.T, venue *fakeVenue, tweak func(*Config)) (*Executor, *fakeSigner, *smoketest.Collector, <-chan struct{}) {
+	t.Helper()
 	signerFake := &fakeSigner{}
-	executor, err := New(Config{
+	cfg := Config{
 		Credentials: Credentials{AccountIndex: testAccountIndex, APIKeyIndex: 2, APIPrivateKey: "ab"},
 		Symbol:      "SOL-PERP",
 		MarketID:    2,
@@ -196,7 +210,11 @@ func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *fakeSign
 		TxRequestTimeout:     250 * time.Millisecond,
 		TxFaultRecoveryDelay: 100 * time.Millisecond,
 		newSigner:            func(*resolvedConfig) (signer, error) { return signerFake, nil },
-	})
+	}
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	executor, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -465,23 +483,60 @@ func TestPlaceOrderPersistentInvalidNonceFails(t *testing.T) {
 }
 
 // A transaction cut short by Close may still have reached the venue: it is
-// reported as an unknown outcome, never as a clean failure.
+// reported as an unknown outcome naming the order, never as a clean failure,
+// and the order stays tracked so its fills can be attributed and a caller can
+// cancel it by id. The venue would have answered success, so only Close
+// cutting the call short can explain a non-nil error.
 func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, _ := newTestExecutor(t, venue)
 	mustConnect(t, executor)
-	venue.queueSendTx(scriptedSendTx{body: `{"code":200}`, delay: 150 * time.Millisecond})
+	arrived := make(chan struct{})
+	venue.queueSendTx(scriptedSendTx{body: `{"code":200,"tx_hash":"0xabc"}`, arrived: arrived, delay: 150 * time.Millisecond})
 	result := make(chan error, 1)
 	go func() {
 		_, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
 		result <- err
 	}()
-	time.Sleep(30 * time.Millisecond)
+	<-arrived
 	if err := executor.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := <-result; !errors.Is(err, godex.ErrTxOutcomeUnknown) {
-		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	err := <-result
+	var unknown *godex.TxOutcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want a TxOutcomeUnknownError", err)
+	}
+	executor.stateMu.Lock()
+	_, tracked := executor.orders[unknown.OrderID]
+	executor.stateMu.Unlock()
+	if !tracked {
+		t.Errorf("the in-flight order %s is not tracked", unknown.OrderID)
+	}
+}
+
+// A request that never reaches the wire — the connection refused before
+// anything was written — applied nothing: it is a plain failure, latches no
+// fault, and the order is written off.
+func TestTransactionThatNeverReachesTheWireIsAPlainFailure(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, _, _ := newTestExecutorStreamWith(t, venue, func(cfg *Config) {
+		cfg.HTTPClient = &http.Client{Transport: dispatchtest.FailBeforeWire(http.DefaultTransport,
+			func(r *http.Request) bool { return r.URL.Path == sendTxPath }, 1)}
+	})
+	mustConnect(t, executor)
+	_, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if !errors.Is(err, dispatchtest.ErrNotDialed) || errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want the transport failure and no unknown outcome", err)
+	}
+	if _, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly)); err != nil {
+		t.Fatalf("a failure before dispatch latched a fault: %v", err)
+	}
+	executor.stateMu.Lock()
+	tracked := len(executor.orders)
+	executor.stateMu.Unlock()
+	if tracked != 1 {
+		t.Errorf("tracked orders = %d, want only the order that went through", tracked)
 	}
 }
 
