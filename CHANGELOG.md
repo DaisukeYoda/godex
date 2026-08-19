@@ -9,6 +9,34 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
+## Unreleased
+
+### Added
+
+- **`godex.TxOutcomeUnknownError`** — the submission that causes an unknown
+  outcome now returns this error (wrapping `ErrTxOutcomeUnknown`) naming
+  the `OrderID` it concerned, on every adapter; the submissions a latched
+  fault later refuses still get the bare fault. A caller left to reconcile
+  by itself — after `Close`, when the adapter no longer can — has the id
+  to do it by.
+
+### Fixed
+
+- **A `Close` that cuts a dispatched submission short is an unknown
+  outcome** on every adapter (Hyperliquid, Lighter, dYdX; TxFlow shipped
+  with this). It used to surface as a plain "lifecycle ended" failure and,
+  on Hyperliquid and Lighter, untrack the order — leaving an order the
+  venue may have taken with nobody to reconcile it. It now latches the
+  fault, keeps the order tracked, and `Close` cancels the lifecycle before
+  taking the submission lock, so an in-flight submission is actually cut
+  short rather than waited out.
+- **A submission that never reached the wire is a plain failure.** The
+  dispatch boundary is now observed (`internal/dispatch`, via
+  `httptrace`): a request refused before its headers were written — the
+  context already canceled, a dial that failed — applied nothing, so it no
+  longer latches a fault or halts trading. Lighter also resyncs its nonce
+  on that path, since the allocated nonce was never submitted.
+
 ## Unreleased — TxFlow adapter
 
 Adds a fourth executor, for TxFlow's perp DEX (`txflow`), and factors the

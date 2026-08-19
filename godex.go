@@ -57,6 +57,24 @@ var (
 	ErrTxOutcomeUnknown = errors.New("godex: transaction outcome unknown")
 )
 
+// TxOutcomeUnknownError is the error the submission that caused an unknown
+// outcome returns — as opposed to the later submissions the latched fault
+// refuses, which return the bare fault. It names the order the ambiguous
+// action concerned (the order being placed, or the one being cancelled), so a
+// caller that has to reconcile with the venue itself — after Close, when the
+// adapter no longer can — has the id to do it by. It wraps ErrTxOutcomeUnknown.
+type TxOutcomeUnknownError struct {
+	OrderID OrderID
+	// Err is the latched fault; it wraps ErrTxOutcomeUnknown.
+	Err error
+}
+
+func (e *TxOutcomeUnknownError) Error() string {
+	return e.Err.Error() + " (order " + string(e.OrderID) + ")"
+}
+
+func (e *TxOutcomeUnknownError) Unwrap() error { return e.Err }
+
 // VenueExecutor is the normalized execution contract every venue adapter
 // implements.
 //
@@ -100,6 +118,12 @@ type VenueExecutor interface {
 	// If a submission outcome is unknown, the adapter latches a fault: the
 	// affected transaction is never retried and subsequent submissions fail
 	// with ErrTxOutcomeUnknown until the adapter reconciles with venue state.
+	// The submission that caused the fault returns a *TxOutcomeUnknownError
+	// naming its OrderID; the order stays tracked. A request that never
+	// reached the wire applied nothing and is a plain failure, not an unknown
+	// outcome. A Close that cuts a dispatched submission short is an unknown
+	// outcome — the venue may have taken it — and nothing runs after Close to
+	// reconcile it, so the caller must, by that OrderID.
 	PlaceOrder(ctx context.Context, order NewOrder) (OrderAck, error)
 
 	// CancelOrder cancels a previously placed order by its executor-scoped

@@ -9,6 +9,7 @@ import (
 
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
+	"github.com/DaisukeYoda/godex/internal/dispatch/dispatchtest"
 )
 
 func TestConnectEmitsVerifiedSnapshot(t *testing.T) {
@@ -519,23 +520,64 @@ func TestUnknownOutcomeIgnoresOrdersThatDoNotMatchTheSubmission(t *testing.T) {
 }
 
 // A submission cut short by Close may still have reached the venue: it is
-// reported as an unknown outcome, never as a clean failure.
+// reported as an unknown outcome naming the order, never as a clean failure,
+// and the order stays tracked rather than being written off. The venue would
+// have answered success, so only Close cutting the call short can explain a
+// non-nil error.
 func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _ := newTestExecutor(t, venue)
 	mustConnect(t, executor)
-	venue.queueExchange(scriptedExchange{delay: 150 * time.Millisecond})
+	arrived := make(chan struct{})
+	venue.queueExchange(scriptedExchange{arrived: arrived, delay: 150 * time.Millisecond})
 	result := make(chan error, 1)
 	go func() {
 		_, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
 		result <- err
 	}()
-	time.Sleep(30 * time.Millisecond)
+	<-arrived
 	if err := executor.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	if err := <-result; !errors.Is(err, godex.ErrTxOutcomeUnknown) {
-		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	err := <-result
+	var unknown *godex.TxOutcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want a TxOutcomeUnknownError", err)
+	}
+	executor.stateMu.Lock()
+	_, tracked := executor.orders[unknown.OrderID]
+	executor.stateMu.Unlock()
+	if !tracked {
+		t.Errorf("the in-flight order %s is not tracked", unknown.OrderID)
+	}
+}
+
+// A request that never reaches the wire — the connection refused before
+// anything was written — applied nothing: it is a plain failure, latches no
+// fault, and the order is written off.
+func TestSubmissionThatNeverReachesTheWireIsAPlainFailure(t *testing.T) {
+	venue := newFakeVenue(t)
+	cfg := testConfig(venue)
+	cfg.HTTPClient = &http.Client{Transport: dispatchtest.FailBeforeWire(http.DefaultTransport,
+		func(r *http.Request) bool { return r.URL.Path == exchangePath }, 1)}
+	executor, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = executor.Close() })
+	mustConnect(t, executor)
+	_, err = executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+	if !errors.Is(err, dispatchtest.ErrNotDialed) || errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want the transport failure and no unknown outcome", err)
+	}
+	if _, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly)); err != nil {
+		t.Fatalf("a failure before dispatch latched a fault: %v", err)
+	}
+	executor.stateMu.Lock()
+	tracked := len(executor.orders)
+	executor.stateMu.Unlock()
+	if tracked != 1 {
+		t.Errorf("tracked orders = %d, want only the order that went through", tracked)
 	}
 }
 

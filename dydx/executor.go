@@ -27,6 +27,7 @@ import (
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
 	"github.com/DaisukeYoda/godex/internal/dedupe"
+	"github.com/DaisukeYoda/godex/internal/dispatch"
 	"github.com/DaisukeYoda/godex/internal/ws"
 )
 
@@ -384,6 +385,12 @@ func (e *Executor) Close() error {
 	e.closed = true
 	e.opMu.Unlock()
 
+	// Unblock in-flight requests — including a submission holding txMu —
+	// and any emitter waiting on a full events channel, then tear the socket
+	// down (its Stop delivers the final DisconnectedEvent via OnDown before
+	// returning).
+	e.lifecycleCancel()
+
 	e.txMu.Lock()
 	e.acceptingTx = false
 	if e.faultTimer != nil {
@@ -391,11 +398,6 @@ func (e *Executor) Close() error {
 		e.faultTimer = nil
 	}
 	e.txMu.Unlock()
-
-	// Unblock in-flight requests and any emitter waiting on a full events
-	// channel, then tear the socket down (its Stop delivers the final
-	// DisconnectedEvent via OnDown before returning).
-	e.lifecycleCancel()
 	e.opMu.Lock()
 	socket := e.socket
 	e.opMu.Unlock()
@@ -517,13 +519,15 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 	// Track before submitting: an unknown outcome must leave a record of an
 	// order that may be live.
 	e.trackOrder(orderID, orderRef{clientID: clientID, goodTilBlock: goodTilBlock})
-	result, err := e.submitTx(ctx, goodTilBlock, func(envelope txParams) ([]byte, error) {
+	result, err := e.submitTx(ctx, orderID, goodTilBlock, func(envelope txParams) ([]byte, error) {
 		return e.signer.signPlaceOrder(params, envelope)
 	})
 	if err != nil {
 		// An unknown outcome leaves the order possibly live, so it stays
-		// tracked until reconciliation says otherwise.
-		if !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		// tracked until reconciliation says otherwise. Anything else —
+		// including a submission the fault latch refused to broadcast —
+		// never reached the chain.
+		if !isUnknownOutcomeFor(err, orderID) {
 			e.untrackOrder(orderID)
 		}
 		return godex.OrderAck{}, err
@@ -601,7 +605,7 @@ func (e *Executor) CancelOrder(ctx context.Context, id godex.OrderID) error {
 	// did apply after an unknown outcome is reported under the Indexer's own
 	// wording; that is the honest answer, since the adapter never learned its
 	// cancel was the cause.
-	result, err := e.submitTx(ctx, goodTilBlock, func(envelope txParams) ([]byte, error) {
+	result, err := e.submitTx(ctx, id, goodTilBlock, func(envelope txParams) ([]byte, error) {
 		return e.signer.signCancelOrder(params, envelope)
 	})
 	if err != nil {
@@ -683,6 +687,7 @@ func (e *Executor) clearCancelIntent(id godex.OrderID) {
 // venue state before trading resumes.
 func (e *Executor) submitTx(
 	ctx context.Context,
+	orderID godex.OrderID,
 	expiryBlock uint32,
 	sign func(envelope txParams) ([]byte, error),
 ) (broadcastResult, error) {
@@ -709,14 +714,30 @@ func (e *Executor) submitTx(
 
 	requestCtx, cancel := context.WithTimeout(e.lifecycleCtx, e.cfg.txRequestTimeout)
 	defer cancel()
+	requestCtx, dispatched := dispatch.Trace(requestCtx)
 	result, err := broadcastTx(requestCtx, e.cfg.httpClient, e.cfg.rpcBaseURL, txBytes)
 	if err != nil {
-		if e.lifecycleCtx.Err() != nil {
-			return broadcastResult{}, fmt.Errorf("dydx: transaction lifecycle ended: %w", e.lifecycleCtx.Err())
+		if !dispatched() {
+			// Nothing reached the wire — the context was already canceled,
+			// or the connection failed first — so nothing was broadcast.
+			return broadcastResult{}, fmt.Errorf("dydx: transaction was not dispatched: %w", err)
 		}
-		return broadcastResult{}, e.latchTxFaultLocked(err, expiryBlock)
+		// Once broadcast, the chain may have taken the transaction whatever
+		// cut the call short — a Close included. That is an unknown outcome
+		// and is reported as one; a fault latched during Close is never
+		// recovered (nothing runs after Close), which is why the caller must
+		// hear it.
+		return broadcastResult{}, e.latchTxFaultLocked(err, orderID, expiryBlock)
 	}
 	return result, nil
+}
+
+// isUnknownOutcomeFor reports whether err is the unknown outcome of a
+// transaction on orderID — the one failure that may have left the order live
+// on the chain.
+func isUnknownOutcomeFor(err error, orderID godex.OrderID) bool {
+	var unknown *godex.TxOutcomeUnknownError
+	return errors.As(err, &unknown) && unknown.OrderID == orderID
 }
 
 func (e *Executor) assertTxCanStartLocked(ctx context.Context) error {
@@ -734,14 +755,18 @@ func (e *Executor) assertTxCanStartLocked(ctx context.Context) error {
 
 // latchTxFaultLocked records an unknown-outcome fault and schedules recovery.
 // The faulted transaction itself is never resent. untilBlock is the block
-// through which the ambiguous transaction could still take effect.
-func (e *Executor) latchTxFaultLocked(cause error, untilBlock uint32) error {
-	if e.txFault == nil {
-		e.txFault = fmt.Errorf("%w; reconciling with venue state: %v", godex.ErrTxOutcomeUnknown, cause)
-		e.txFaultUntilBlock = untilBlock
-		e.scheduleFaultRecoveryLocked()
+// through which the ambiguous transaction could still take effect. The
+// transaction that caused the fault learns which order it concerned; the
+// transactions the fault later refuses get the bare fault, since nothing of
+// theirs reached the chain.
+func (e *Executor) latchTxFaultLocked(cause error, orderID godex.OrderID, untilBlock uint32) error {
+	if e.txFault != nil {
+		return e.txFault
 	}
-	return e.txFault
+	e.txFault = fmt.Errorf("%w; reconciling with venue state: %v", godex.ErrTxOutcomeUnknown, cause)
+	e.txFaultUntilBlock = untilBlock
+	e.scheduleFaultRecoveryLocked()
+	return &godex.TxOutcomeUnknownError{OrderID: orderID, Err: e.txFault}
 }
 
 func (e *Executor) scheduleFaultRecoveryLocked() {

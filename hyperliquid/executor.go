@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -19,6 +20,7 @@ import (
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
 	"github.com/DaisukeYoda/godex/internal/dedupe"
+	"github.com/DaisukeYoda/godex/internal/dispatch"
 	"github.com/DaisukeYoda/godex/internal/evmsign"
 	"github.com/DaisukeYoda/godex/internal/ws"
 )
@@ -314,6 +316,12 @@ func (e *Executor) Close() error {
 	e.closed = true
 	e.opMu.Unlock()
 
+	// Unblock in-flight REST calls — including a submission holding txMu —
+	// and any emitter waiting on a full events channel, then tear the socket
+	// down (its Stop delivers the final DisconnectedEvent via OnDown before
+	// returning).
+	e.lifecycleCancel()
+
 	e.txMu.Lock()
 	e.acceptingTx = false
 	if e.faultTimer != nil {
@@ -321,11 +329,6 @@ func (e *Executor) Close() error {
 		e.faultTimer = nil
 	}
 	e.txMu.Unlock()
-
-	// Unblock in-flight REST calls and any emitter waiting on a full events
-	// channel, then tear the socket down (its Stop delivers the final
-	// DisconnectedEvent via OnDown before returning).
-	e.lifecycleCancel()
 	if e.socket != nil {
 		_ = e.socket.Stop()
 	}
@@ -438,7 +441,7 @@ func (e *Executor) PlaceOrder(ctx context.Context, order godex.NewOrder) (godex.
 		// An order left in flight may be live, so it stays tracked until
 		// reconciliation settles it. Anything else — including a submission
 		// the fault latch refused to dispatch — never reached the venue.
-		if !e.isAmbiguousSubmission(orderID) {
+		if !isUnknownOutcomeFor(err, orderID) {
 			e.untrackOrder(orderID)
 		}
 		return godex.OrderAck{}, err
@@ -624,14 +627,29 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 
 	requestCtx, cancel := context.WithTimeout(e.lifecycleCtx, e.cfg.txRequestTimeout)
 	defer cancel()
+	requestCtx, dispatched := dispatch.Trace(requestCtx)
 	statuses, failure, err := postExchange(requestCtx, e.cfg.httpClient, e.cfg.restBaseURL, request)
 	if err != nil {
-		if e.lifecycleCtx.Err() != nil {
-			return nil, "", fmt.Errorf("hyperliquid: submission lifecycle ended: %w", e.lifecycleCtx.Err())
+		if !dispatched() {
+			// Nothing reached the wire — the context was already canceled,
+			// or the connection failed first — so nothing was applied.
+			return nil, "", fmt.Errorf("hyperliquid: submission was not dispatched: %w", err)
 		}
+		// Once dispatched, the venue may have taken the action whatever cut
+		// the call short — a Close included. That is an unknown outcome and
+		// is reported as one; a fault latched during Close is never recovered
+		// (nothing runs after Close), which is why the caller must hear it.
 		return nil, "", e.latchTxFaultLocked(err, orderID)
 	}
 	return statuses, failure, nil
+}
+
+// isUnknownOutcomeFor reports whether err is the unknown outcome of an action
+// on orderID — the one failure that may have left the order live at the
+// venue.
+func isUnknownOutcomeFor(err error, orderID godex.OrderID) bool {
+	var unknown *godex.TxOutcomeUnknownError
+	return errors.As(err, &unknown) && unknown.OrderID == orderID
 }
 
 func (e *Executor) assertTxCanStartLocked(ctx context.Context) error {
@@ -664,12 +682,16 @@ func (e *Executor) nextNonceLocked() uint64 {
 // are halted (no blind retry that could double-submit) and reconciliation is
 // scheduled. The faulted submission itself is never resent.
 func (e *Executor) latchTxFaultLocked(cause error, orderID godex.OrderID) error {
-	if e.txFault == nil {
-		e.txFault = fmt.Errorf("%w; reconciling with venue order state: %v", godex.ErrTxOutcomeUnknown, cause)
-		e.txFaultOrderID = orderID
-		e.scheduleFaultRecoveryLocked()
+	if e.txFault != nil {
+		return e.txFault
 	}
-	return e.txFault
+	e.txFault = fmt.Errorf("%w; reconciling with venue order state: %v", godex.ErrTxOutcomeUnknown, cause)
+	e.txFaultOrderID = orderID
+	e.scheduleFaultRecoveryLocked()
+	// The submission that caused the fault learns which order it concerned;
+	// the submissions the fault later refuses get the bare fault, since
+	// nothing of theirs reached the venue.
+	return &godex.TxOutcomeUnknownError{OrderID: orderID, Err: e.txFault}
 }
 
 // latchTxFault records an unknown outcome discovered after the submission
@@ -678,16 +700,6 @@ func (e *Executor) latchTxFault(cause error, orderID godex.OrderID) error {
 	e.txMu.Lock()
 	defer e.txMu.Unlock()
 	return e.latchTxFaultLocked(cause, orderID)
-}
-
-// isAmbiguousSubmission reports whether orderID names the submission whose
-// outcome is unresolved. It is the only order a failed call may have left
-// live: every other failure — signing, or a fault latch that refused to
-// dispatch — happened before anything reached the venue.
-func (e *Executor) isAmbiguousSubmission(orderID godex.OrderID) bool {
-	e.txMu.Lock()
-	defer e.txMu.Unlock()
-	return e.txFault != nil && e.txFaultOrderID == orderID
 }
 
 func (e *Executor) scheduleFaultRecoveryLocked() {

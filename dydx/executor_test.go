@@ -23,6 +23,7 @@ import (
 	"github.com/DaisukeYoda/godex"
 	"github.com/DaisukeYoda/godex/decimal"
 	authpb "github.com/DaisukeYoda/godex/dydx/internal/pb/cosmos/auth/v1beta1"
+	"github.com/DaisukeYoda/godex/internal/dispatch/dispatchtest"
 	"github.com/DaisukeYoda/godex/smoketest"
 )
 
@@ -39,6 +40,9 @@ const (
 type scriptedBroadcast struct {
 	body  string
 	delay time.Duration
+	// arrived, when set, is closed once the venue has read the request —
+	// the moment a test that wants to interrupt the call in flight waits for.
+	arrived chan struct{}
 }
 
 const acceptedBroadcast = `{"jsonrpc":"2.0","id":-1,"result":{"code":0,"log":"","hash":"ABC123"}}`
@@ -171,6 +175,9 @@ func newFakeVenue(t *testing.T) *fakeVenue {
 				script, venue.broadcastQueue = venue.broadcastQueue[0], venue.broadcastQueue[1:]
 			}
 			venue.mu.Unlock()
+			if script.arrived != nil {
+				close(script.arrived)
+			}
 			if script.delay > 0 {
 				time.Sleep(script.delay)
 			}
@@ -460,8 +467,15 @@ func newTestExecutor(t *testing.T, venue *fakeVenue) (*Executor, *recordingSigne
 // is.
 func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *recordingSigner, *smoketest.Collector, <-chan struct{}) {
 	t.Helper()
+	return newTestExecutorStreamWith(t, venue, nil)
+}
+
+// newTestExecutorStreamWith is newTestExecutorStream with the config adjusted
+// by tweak before construction.
+func newTestExecutorStreamWith(t *testing.T, venue *fakeVenue, tweak func(*Config)) (*Executor, *recordingSigner, *smoketest.Collector, <-chan struct{}) {
+	t.Helper()
 	fake := &recordingSigner{addr: testAddress}
-	executor, err := New(Config{
+	cfg := Config{
 		Credentials: Credentials{
 			PrivateKeyHex:    testPrivateKeyHex,
 			Address:          testAddress,
@@ -485,7 +499,11 @@ func newTestExecutorStream(t *testing.T, venue *fakeVenue) (*Executor, *recordin
 		HeightPollInterval:   50 * time.Millisecond,
 		HeightStaleAfter:     2 * time.Second,
 		newSigner:            func(*resolvedConfig) (signer, error) { return fake, nil },
-	})
+	}
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	executor, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -861,6 +879,78 @@ func TestPlaceOrderOtherRejectionIsAnError(t *testing.T) {
 	if _, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly)); err == nil {
 		t.Fatal("expected an error for a non-post-only rejection")
 	}
+}
+
+// A broadcast cut short by Close may still have reached the chain: it is
+// reported as an unknown outcome naming the order, never as a clean failure,
+// and the order stays tracked rather than being written off. The chain would
+// have accepted, so only Close cutting the call short can explain a non-nil
+// error.
+func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
+	venue := newFakeVenue(t)
+	arrived := make(chan struct{})
+	venue.queueBroadcast(scriptedBroadcast{body: acceptedBroadcast, arrived: arrived, delay: 200 * time.Millisecond})
+	executor, _, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	result := make(chan error, 1)
+	go func() {
+		_, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+		result <- err
+	}()
+	<-arrived
+	if err := executor.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	err := <-result
+	var unknown *godex.TxOutcomeUnknownError
+	if !errors.As(err, &unknown) || !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want a TxOutcomeUnknownError", err)
+	}
+	executor.stateMu.Lock()
+	_, tracked := executor.orders[unknown.OrderID]
+	executor.stateMu.Unlock()
+	if !tracked {
+		t.Errorf("the in-flight order %s is not tracked", unknown.OrderID)
+	}
+}
+
+// A broadcast that never reaches the wire — the connection refused before
+// anything was written — applied nothing: it is a plain failure, latches no
+// fault, and the order is written off.
+func TestBroadcastThatNeverReachesTheWireIsAPlainFailure(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, _, _ := newTestExecutorStreamWith(t, venue, func(cfg *Config) {
+		cfg.HTTPClient = &http.Client{Transport: dispatchtest.FailBeforeWire(http.DefaultTransport,
+			isBroadcastRequest, 1)}
+	})
+	mustConnect(t, executor)
+	_, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+	if !errors.Is(err, dispatchtest.ErrNotDialed) || errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want the transport failure and no unknown outcome", err)
+	}
+	if _, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly)); err != nil {
+		t.Fatalf("a failure before dispatch latched a fault: %v", err)
+	}
+	executor.stateMu.Lock()
+	tracked := len(executor.orders)
+	executor.stateMu.Unlock()
+	if tracked != 1 {
+		t.Errorf("tracked orders = %d, want only the order that went through", tracked)
+	}
+}
+
+// isBroadcastRequest recognizes a broadcast_tx_sync RPC by its body.
+func isBroadcastRequest(r *http.Request) bool {
+	if r.GetBody == nil {
+		return false
+	}
+	body, err := r.GetBody()
+	if err != nil {
+		return false
+	}
+	defer func() { _ = body.Close() }()
+	data, err := io.ReadAll(body)
+	return err == nil && strings.Contains(string(data), "broadcast_tx_sync")
 }
 
 // TestPlaceOrderUnknownOutcomeLatchesFaultAndRecovers covers the never-retry
