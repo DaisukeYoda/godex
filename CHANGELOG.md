@@ -9,6 +9,20 @@ passes on testnet — connect and verified snapshot, far post-only and cancel,
 crossing post-only rejected on the normal path, IOC fill and position, forced
 reconnect with convergence and no duplicate fills, reduce-only close to flat.
 
+## Unreleased
+
+### Fixed
+
+- **A `Close` that cuts a dispatched submission short is an unknown
+  outcome** on every adapter (Hyperliquid, Lighter, dYdX; TxFlow shipped
+  with this). It used to surface as a plain "lifecycle ended" failure and,
+  on Hyperliquid, untrack the order — leaving an order the venue may have
+  taken with nobody to reconcile it. It now latches the fault and returns
+  `ErrTxOutcomeUnknown` (the order stays tracked where the adapter tracks
+  ambiguous submissions), and `Close` cancels the lifecycle before taking
+  the submission lock, so an in-flight submission is actually cut short
+  rather than waited out.
+
 ## Unreleased — TxFlow adapter
 
 Adds a fourth executor, for TxFlow's perp DEX (`txflow`), and factors the

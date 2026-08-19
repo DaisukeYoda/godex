@@ -863,6 +863,34 @@ func TestPlaceOrderOtherRejectionIsAnError(t *testing.T) {
 	}
 }
 
+// A broadcast cut short by Close may still have reached the chain: it is
+// reported as an unknown outcome, never as a clean failure, and the order
+// stays tracked rather than being written off.
+func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
+	venue := newFakeVenue(t)
+	venue.queueBroadcast(scriptedBroadcast{body: acceptedBroadcast, delay: 200 * time.Millisecond})
+	executor, _, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	result := make(chan error, 1)
+	go func() {
+		_, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+		result <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	if err := executor.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := <-result; !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	}
+	executor.stateMu.Lock()
+	tracked := len(executor.orders)
+	executor.stateMu.Unlock()
+	if tracked != 1 {
+		t.Errorf("tracked orders = %d, want the in-flight order kept", tracked)
+	}
+}
+
 // TestPlaceOrderUnknownOutcomeLatchesFaultAndRecovers covers the never-retry
 // rule: a broadcast whose answer never arrives halts trading, and the adapter
 // waits until the ambiguous order can no longer be live before concluding

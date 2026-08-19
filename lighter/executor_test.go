@@ -464,6 +464,27 @@ func TestPlaceOrderPersistentInvalidNonceFails(t *testing.T) {
 	}
 }
 
+// A transaction cut short by Close may still have reached the venue: it is
+// reported as an unknown outcome, never as a clean failure.
+func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	venue.queueSendTx(scriptedSendTx{body: `{"code":200}`, delay: 150 * time.Millisecond})
+	result := make(chan error, 1)
+	go func() {
+		_, err := executor.PlaceOrder(context.Background(), testOrder(godex.IntentPostOnly))
+		result <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	if err := executor.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := <-result; !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	}
+}
+
 func TestTxFaultLatchAndRecovery(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _, _ := newTestExecutor(t, venue)

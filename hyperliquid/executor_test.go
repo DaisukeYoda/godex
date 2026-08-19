@@ -594,6 +594,34 @@ func TestUnknownWebSocketChannelAbortsConnection(t *testing.T) {
 	}
 }
 
+// A submission cut short by Close may still have reached the venue: it is
+// reported as an unknown outcome, never as a clean failure, and the order
+// stays tracked rather than being written off.
+func TestCloseDuringSubmissionReportsAnUnknownOutcome(t *testing.T) {
+	venue := newFakeVenue(t)
+	executor, _ := newTestExecutor(t, venue)
+	mustConnect(t, executor)
+	venue.queueExchange(scriptedExchange{delay: 150 * time.Millisecond})
+	result := make(chan error, 1)
+	go func() {
+		_, err := executor.PlaceOrder(t.Context(), testOrder(godex.IntentPostOnly))
+		result <- err
+	}()
+	time.Sleep(30 * time.Millisecond)
+	if err := executor.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if err := <-result; !errors.Is(err, godex.ErrTxOutcomeUnknown) {
+		t.Fatalf("PlaceOrder error = %v, want ErrTxOutcomeUnknown", err)
+	}
+	executor.stateMu.Lock()
+	tracked := len(executor.orders)
+	executor.stateMu.Unlock()
+	if tracked != 1 {
+		t.Errorf("tracked orders = %d, want the in-flight order kept", tracked)
+	}
+}
+
 func TestCloseIsTerminalAndIdempotent(t *testing.T) {
 	venue := newFakeVenue(t)
 	executor, _ := newTestExecutor(t, venue)

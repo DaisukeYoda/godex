@@ -100,6 +100,10 @@ type VenueExecutor interface {
 	// If a submission outcome is unknown, the adapter latches a fault: the
 	// affected transaction is never retried and subsequent submissions fail
 	// with ErrTxOutcomeUnknown until the adapter reconciles with venue state.
+	// A Close that cuts a dispatched submission short is such an outcome —
+	// the venue may have taken it — and is reported as ErrTxOutcomeUnknown,
+	// never as a clean failure; nothing runs after Close to reconcile it, so
+	// the caller must.
 	PlaceOrder(ctx context.Context, order NewOrder) (OrderAck, error)
 
 	// CancelOrder cancels a previously placed order by its executor-scoped

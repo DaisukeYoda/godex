@@ -314,6 +314,12 @@ func (e *Executor) Close() error {
 	e.closed = true
 	e.opMu.Unlock()
 
+	// Unblock in-flight REST calls — including a submission holding txMu —
+	// and any emitter waiting on a full events channel, then tear the socket
+	// down (its Stop delivers the final DisconnectedEvent via OnDown before
+	// returning).
+	e.lifecycleCancel()
+
 	e.txMu.Lock()
 	e.acceptingTx = false
 	if e.faultTimer != nil {
@@ -321,11 +327,6 @@ func (e *Executor) Close() error {
 		e.faultTimer = nil
 	}
 	e.txMu.Unlock()
-
-	// Unblock in-flight REST calls and any emitter waiting on a full events
-	// channel, then tear the socket down (its Stop delivers the final
-	// DisconnectedEvent via OnDown before returning).
-	e.lifecycleCancel()
 	if e.socket != nil {
 		_ = e.socket.Stop()
 	}
@@ -626,9 +627,10 @@ func (e *Executor) submitAction(ctx context.Context, action any, orderID godex.O
 	defer cancel()
 	statuses, failure, err := postExchange(requestCtx, e.cfg.httpClient, e.cfg.restBaseURL, request)
 	if err != nil {
-		if e.lifecycleCtx.Err() != nil {
-			return nil, "", fmt.Errorf("hyperliquid: submission lifecycle ended: %w", e.lifecycleCtx.Err())
-		}
+		// Once dispatched, the venue may have taken the action whatever cut
+		// the call short — a Close included. That is an unknown outcome and
+		// is reported as one; a fault latched during Close is never recovered
+		// (nothing runs after Close), which is why the caller must hear it.
 		return nil, "", e.latchTxFaultLocked(err, orderID)
 	}
 	return statuses, failure, nil
